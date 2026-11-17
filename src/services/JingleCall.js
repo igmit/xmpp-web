@@ -1,0 +1,421 @@
+import jid from '@xmpp/jid'
+import xml from '@xmpp/xml'
+import { nanoid } from 'nanoid'
+import { descriptionToJingle, jingleToDescription, transportCandidates } from './jingleMedia.js'
+import { JINGLE, RTP, RTP_INFO, ICE } from './jingleNamespaces.js'
+
+const RING_TIMEOUT = 60000
+const CONNECTION_TIMEOUT = 35000
+const ICE_GATHERING_TIMEOUT = 15000
+const RECOVERY_TIMEOUT = 10000
+const CONNECTION_ERROR = 'Could not connect the call. The networks may require a TURN relay.'
+const REMOTE_END_MESSAGES = {
+  busy: 'The other contact is busy.',
+  cancel: 'The caller canceled the call.',
+  'connectivity-error': CONNECTION_ERROR,
+  decline: 'The other contact declined the call.',
+  expired: 'The call expired.',
+  'failed-application': 'The other contact could not set up the call.',
+  'failed-transport': CONNECTION_ERROR,
+  'general-error': 'The call ended because of an error.',
+  gone: 'The other contact disconnected.',
+  'incompatible-parameters': 'The other contact could not negotiate call media.',
+  'media-error': 'The other contact encountered a media error.',
+  'security-error': 'Could not establish a secure call.',
+  success: undefined,
+  timeout: 'The call timed out.',
+  'unsupported-applications': 'The other contact does not support this call type.',
+  'unsupported-transports': 'The other contact does not support this call transport.',
+}
+
+function stanzaError (condition, jingleCondition) {
+  return Object.assign(new Error(jingleCondition || condition), { condition, jingleCondition })
+}
+
+function stopTracks (stream) {
+  stream?.getTracks().forEach(track => track.stop())
+}
+
+function fullJid (address) {
+  if (typeof address !== 'string') return null
+  try {
+    const parsed = jid(address)
+    return parsed.getLocal() && parsed.getResource() ? parsed : null
+  } catch {
+    return null
+  }
+}
+
+function localError (error, video) {
+  const devices = video ? 'microphone and camera' : 'microphone'
+  switch (error?.name) {
+    case 'NotAllowedError':
+    case 'SecurityError':
+      return `Allow ${devices} access in your browser to make calls.`
+    case 'NotFoundError':
+    case 'OverconstrainedError':
+      return `Could not find the ${devices} needed for this call.`
+    case 'NotReadableError':
+    case 'AbortError':
+      return `Could not access your ${devices}. Check whether another app is using ${video ? 'them' : 'it'}.`
+    case 'CallSetupError':
+      return error.message
+  }
+  switch (error?.condition) {
+    case 'service-unavailable':
+    case 'recipient-unavailable':
+    case 'remote-server-not-found':
+    case 'feature-not-implemented':
+      return 'The other contact is unavailable for calls.'
+  }
+  return 'Could not set up the call.'
+}
+
+function setupError (message) {
+  return Object.assign(new Error(message), { name: 'CallSetupError' })
+}
+
+function waitForIce (pc, signal) {
+  if (pc.iceGatheringState === 'complete') return Promise.resolve(true)
+  if (signal.aborted) return Promise.resolve(false)
+  return new Promise(resolve => {
+    const finish = complete => {
+      clearTimeout(timer)
+      pc.removeEventListener('icegatheringstatechange', onGathering)
+      signal.removeEventListener('abort', onAbort)
+      resolve(complete)
+    }
+    const onAbort = () => finish(false)
+    const onGathering = () => {
+      if (pc.iceGatheringState === 'complete') finish(true)
+    }
+    const timer = setTimeout(() => finish(false), ICE_GATHERING_TIMEOUT)
+    pc.addEventListener('icegatheringstatechange', onGathering)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+}
+
+export class JingleCall {
+  constructor ({ ownJid, send, onChange, iceServers = [] }) {
+    this.ownJid = fullJid(ownJid)
+    this.send = send
+    this.onChange = onChange
+    this.iceServers = iceServers
+    this.session = null
+    this.generation = 0
+  }
+
+  createSession (sid, peer, video, phase, remoteOffer) {
+    const abort = new AbortController()
+    const session = {
+      sid, peer, video, phase, remoteOffer, abort,
+      signalled: phase === 'incoming',
+      candidates: [],
+      localStream: null,
+      remoteStream: null,
+    }
+    this.session = session
+    this.phase(session, phase)
+    return session
+  }
+
+  phase (session, phase) {
+    session.phase = phase
+    this.schedulePhaseTimeout(session)
+    this.publish(session)
+  }
+
+  schedulePhaseTimeout (session) {
+    clearTimeout(session.phaseTimer)
+    const { phase } = session
+    if (phase === 'incoming' || phase === 'outgoing') {
+      session.phaseTimer = setTimeout(() => {
+        const error = phase === 'incoming' ? 'The incoming call timed out.' :
+          session.signalled ? 'The other contact did not answer.' : 'Call setup timed out.'
+        this.finish(session, 'timeout', error)
+      }, RING_TIMEOUT)
+    } else if (phase === 'connecting') {
+      session.phaseTimer = setTimeout(() => this.finish(session, 'connectivity-error', CONNECTION_ERROR), CONNECTION_TIMEOUT)
+    }
+  }
+
+  publish (session, ended) {
+    const { phase, peer, video, localStream, remoteStream } = session
+    this.onChange({ phase, peer, video, localStream, remoteStream, ...ended })
+  }
+
+  async sendAction (session, action, children) {
+    const attrs = { xmlns: JINGLE, action, sid: session.sid }
+    if (action === 'session-initiate') attrs.initiator = this.ownJid.toString()
+    if (action === 'session-accept') attrs.responder = this.ownJid.toString()
+    await this.send(session.peer, xml('jingle', attrs, ...children))
+  }
+
+  async signalTermination (session, reason) {
+    try {
+      await this.sendAction(session, 'session-terminate', [xml('reason', {}, xml(reason))])
+    } catch {
+      // Local media is already closed, including when the peer has gone offline.
+    }
+  }
+
+  later (send) {
+    const generation = this.generation
+    // Let the incoming IQ handler acknowledge the request before replying with a new IQ.
+    setTimeout(() => {
+      if (generation === this.generation) send()
+    }, 0)
+  }
+
+  cleanup (session) {
+    this.session = null
+    clearTimeout(session.phaseTimer)
+    clearTimeout(session.recoveryTimer)
+    session.abort.abort()
+    if (session.pc) {
+      session.pc.ontrack = null
+      session.pc.onconnectionstatechange = null
+      session.pc.close()
+    }
+    stopTracks(session.localStream)
+    stopTracks(session.remoteStream)
+    session.localStream = null
+    session.remoteStream = null
+  }
+
+  finish (session, reason, error, notifyPeer = true) {
+    if (this.session !== session) return
+    this.cleanup(session)
+    session.phase = 'ended'
+    const pending = session.signalled && notifyPeer ? this.signalTermination(session, reason) : undefined
+    this.publish(session, { reason, error })
+    return pending
+  }
+
+  reset () {
+    this.generation += 1
+    if (this.session) this.cleanup(this.session)
+    this.onChange(null)
+  }
+
+  async end () {
+    const session = this.session
+    if (!session) {
+      this.onChange(null)
+      return
+    }
+    const reason = session.accepted ? 'success' : session.remoteOffer ? 'decline' : 'cancel'
+    await this.finish(session, reason)
+  }
+
+  async openPeer (session) {
+    if (this.session !== session) return null
+    const media = globalThis.navigator?.mediaDevices
+    if (!media?.getUserMedia || !globalThis.RTCPeerConnection || !globalThis.MediaStream) {
+      throw setupError('Calls require a browser with WebRTC and a secure connection (HTTPS).')
+    }
+    const { signal } = session.abort
+    const canceled = new Promise(resolve => {
+      signal.addEventListener('abort', () => resolve(null), { once: true })
+    })
+    const capture = media.getUserMedia({ audio: true, video: session.video }).then(stream => {
+      if (this.session === session) session.localStream = stream
+      else stopTracks(stream)
+    })
+    const iceConfiguration = Promise.resolve().then(() => {
+      if (typeof this.iceServers === 'function') return signal.aborted ? [] : this.iceServers()
+      return this.iceServers
+    })
+    const setup = await Promise.race([Promise.all([capture, iceConfiguration]), canceled])
+    if (!setup || this.session !== session) return null
+
+    const [, iceServers] = setup
+    const stream = session.localStream
+    const pc = new globalThis.RTCPeerConnection({ iceServers })
+    session.pc = pc
+    pc.ontrack = ({ track }) => {
+      if (this.session !== session) return
+      if (!session.remoteStream) session.remoteStream = new globalThis.MediaStream()
+      session.remoteStream.addTrack(track)
+      this.publish(session)
+    }
+    pc.onconnectionstatechange = () => this.connectionChanged(session)
+    stream.getTracks().forEach(track => pc.addTrack(track, stream))
+    this.publish(session)
+    return this.session === session ? pc : null
+  }
+
+  connectionChanged (session) {
+    if (this.session !== session) return
+    clearTimeout(session.recoveryTimer)
+    const state = session.pc.connectionState
+    if (state === 'connected' && session.negotiated && session.phase === 'connecting') {
+      this.phase(session, 'active')
+    } else if (state === 'failed' || state === 'closed') {
+      this.finish(session, 'connectivity-error', CONNECTION_ERROR)
+    } else if (state === 'disconnected') {
+      session.recoveryTimer = setTimeout(() => this.finish(session, 'connectivity-error', CONNECTION_ERROR), RECOVERY_TIMEOUT)
+    }
+  }
+
+  async localDescription (session, description, role) {
+    if (this.session !== session) return null
+    const pc = session.pc
+    await pc.setLocalDescription(description)
+    const completed = await waitForIce(pc, session.abort.signal)
+    if (this.session !== session) return null
+    const children = descriptionToJingle(pc.localDescription.sdp, role)
+    if (!completed && !children.some(child => child.getChild('transport', ICE)?.getChild('candidate', ICE))) {
+      throw setupError('Timed out while gathering network addresses for the call.')
+    }
+    return children
+  }
+
+  async remoteDescription (session, description) {
+    await session.pc.setRemoteDescription(description)
+    if (this.session !== session) return
+    session.remoteReady = true
+    const pending = session.candidates.splice(0)
+    // A rejected early candidate should not prevent other candidates from being tried.
+    await Promise.allSettled(pending.map(candidate => session.pc.addIceCandidate(candidate)))
+  }
+
+  async start (address, video = false) {
+    const peer = fullJid(address)
+    if (!this.ownJid || !peer || peer.bare().toString() === this.ownJid.bare().toString()) {
+      throw new Error('Choose a contact with an available calling device.')
+    }
+    if (this.session) throw new Error('There is already a call in progress.')
+    const session = this.createSession(nanoid(), peer.toString(), Boolean(video), 'outgoing')
+    try {
+      const pc = await this.openPeer(session)
+      if (!pc) return
+      const children = await this.localDescription(session, await pc.createOffer(), 'initiator')
+      if (!children) return
+      session.mids = children.filter(child => child.name === 'content').map(content => content.attrs.name)
+      session.signalled = true
+      this.schedulePhaseTimeout(session)
+      await this.sendAction(session, 'session-initiate', children)
+    } catch (error) {
+      if (session.phase === 'outgoing') this.finish(session, 'failed-application', localError(error, session.video), !error?.condition)
+    }
+  }
+
+  async accept () {
+    const session = this.session
+    if (session?.phase !== 'incoming') return
+    this.phase(session, 'connecting')
+    try {
+      const pc = await this.openPeer(session)
+      if (!pc) return
+      await this.remoteDescription(session, { type: 'offer', sdp: session.remoteOffer })
+      if (this.session !== session) return
+      const children = await this.localDescription(session, await pc.createAnswer(), 'responder')
+      if (!children) return
+      session.accepted = true
+      await this.sendAction(session, 'session-accept', children)
+      session.negotiated = true
+      this.connectionChanged(session)
+    } catch (error) {
+      this.finish(session, 'failed-application', localError(error, session.video))
+    }
+  }
+
+  receiveOffer (peer, jingle) {
+    const { sid, initiator } = jingle.attrs
+    if (initiator && fullJid(initiator)?.toString() !== peer) throw stanzaError('bad-request')
+    const contents = jingle.getChildren('content', JINGLE)
+    const video = contents.some(content => content.getChild('description', RTP)?.attrs.media === 'video')
+    const current = this.session
+    if (current) {
+      const glare = current.peer === peer && current.phase === 'outgoing' && (!current.signalled || current.video === video)
+      if (!glare && current.peer === peer && current.sid === sid) throw stanzaError('unexpected-request', 'out-of-order')
+      if (glare && current.signalled && (current.sid < sid || (current.sid === sid && this.ownJid.toString() < peer))) {
+        throw stanzaError('conflict', 'tie-break')
+      }
+      if (!glare) {
+        this.later(() => this.signalTermination({ sid, peer }, 'busy'))
+        return
+      }
+    }
+
+    let sdp
+    try {
+      sdp = jingleToDescription(jingle, 'initiator')
+    } catch {
+      throw stanzaError('bad-request')
+    }
+    if (current) this.cleanup(current)
+    const session = this.createSession(sid, peer, video, 'incoming', sdp)
+    session.mids = contents.map(content => content.attrs.name)
+    this.later(() => {
+      if (this.session === session && session.phase === 'incoming') {
+        this.sendAction(session, 'session-info', [xml('ringing', { xmlns: RTP_INFO })]).catch(() => {})
+      }
+    })
+  }
+
+  async receiveAnswer (session, jingle) {
+    if (session.phase !== 'outgoing') throw stanzaError('unexpected-request', 'out-of-order')
+    const responder = jingle.attrs.responder
+    if (responder && fullJid(responder)?.toString() !== session.peer) throw stanzaError('bad-request')
+    session.accepted = true
+    this.phase(session, 'connecting')
+    if (this.session !== session) return
+    try {
+      const sdp = jingleToDescription(jingle, 'responder', session.mids)
+      await this.remoteDescription(session, { type: 'answer', sdp })
+    } catch {
+      this.finish(session, 'incompatible-parameters', 'The other contact sent an incompatible call answer.', false)
+      throw stanzaError('bad-request')
+    }
+    session.negotiated = true
+    this.connectionChanged(session)
+  }
+
+  async receiveCandidates (session, jingle) {
+    try {
+      const candidates = transportCandidates(jingle, session.mids)
+      if (!session.remoteReady) {
+        if (session.candidates.length + candidates.length > 256) throw new Error('Too many pending candidates')
+        session.candidates.push(...candidates)
+      } else {
+        await Promise.all(candidates.map(candidate => session.pc.addIceCandidate(candidate)))
+      }
+    } catch {
+      throw stanzaError('bad-request')
+    }
+  }
+
+  async receive (address, jingle) {
+    const peer = fullJid(address)
+    if (!this.ownJid || !peer || peer.bare().toString() === this.ownJid.bare().toString() || !jingle?.is('jingle', JINGLE)) {
+      throw stanzaError('bad-request')
+    }
+    const { sid, action } = jingle.attrs
+    if (typeof sid !== 'string' || !sid || /\s/.test(sid) || !action) throw stanzaError('bad-request')
+    if (action === 'session-initiate') return this.receiveOffer(peer.toString(), jingle)
+
+    const session = this.session
+    if (!session?.signalled || session.peer !== peer.toString() || session.sid !== sid) throw stanzaError('item-not-found', 'unknown-session')
+    switch (action) {
+      case 'session-accept':
+        return this.receiveAnswer(session, jingle)
+      case 'session-terminate': {
+        const reason = jingle.getChild('reason', JINGLE)?.getChildElements()[0]?.name || 'success'
+        const code = Object.hasOwn(REMOTE_END_MESSAGES, reason) ? reason : 'general-error'
+        this.finish(session, code, REMOTE_END_MESSAGES[code], false)
+        return
+      }
+      case 'transport-info':
+        return this.receiveCandidates(session, jingle)
+      case 'session-info':
+        if (jingle.getChildElements().every(info => info.is('ringing', RTP_INFO) || info.is('active', RTP_INFO))) return
+        throw stanzaError('feature-not-implemented', 'unsupported-info')
+      default:
+        throw stanzaError('feature-not-implemented')
+    }
+  }
+}
+
+export default JingleCall

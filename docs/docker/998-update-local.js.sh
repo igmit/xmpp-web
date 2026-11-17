@@ -57,6 +57,12 @@ update_localjs() {
     sed -i -r "s|hasSendingEnterKey: false|hasSendingEnterKey: true|g" $localjs
   fi
 
+  if [ -n "$APP_ICE_SERVERS" ]; then
+    # Treat the JSON as literal replacement text, including URL and credential characters.
+    ice_servers=$(printf '%s' "$APP_ICE_SERVERS" | sed 's/[\\&|]/\\&/g')
+    sed -i -r "s|iceServers: \[\]|iceServers: $ice_servers|" $localjs
+  fi
+
   if [ "$APP_PINNED_MUCS" != "" ]; then
     sed -i -r "s|pinnedMucs: \[\]|pinnedMucs: $APP_PINNED_MUCS|g" $localjs
   fi

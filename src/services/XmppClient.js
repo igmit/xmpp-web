@@ -1,6 +1,8 @@
 import { client, xml, jid as createJid } from '@xmpp/client'
 import XMPPError from '@xmpp/error'
 import { nanoid } from 'nanoid'
+import { JINGLE } from './jingleNamespaces.js'
+import { CAPS, EXTDISCO, callCapabilities, iceServersFromServices, stanzaError } from './jingleDiscovery'
 
 const hasDebug = true
 const hasChatState = true
@@ -53,14 +55,9 @@ const NS = {
   REACTIONS: 'urn:xmpp:reactions:0',
 }
 
-let xmppClient = null
-let discoInfoCache = []
-
 class XmppClient {
   constructor(config) {
-    if (xmppClient) {
-      xmppClient.disconnect()
-    }
+    this.discoInfoCache = new Map()
     this.config = config
     // declare custom events listeners
     this.callbacks = {
@@ -85,14 +82,46 @@ class XmppClient {
       username: config.jid,
       password: config.password,
     })
-    xmppClient = this
     // default events listeners
     if (import.meta.env.DEV && hasDebug) {
       this.xmpp.on('stanza', stanza => console.debug('0-stanza', stanza))
       this.xmpp.on('error', error => console.debug('0-error', error))
       this.xmpp.on('status', status => console.debug('0-status', status))
     }
-    this.xmpp.on('stanza', this.parseStanza)
+    this.xmpp.on('stanza', stanza => this.parseStanza(stanza))
+  }
+
+  enableCalls (receive) {
+    this.capabilities = callCapabilities()
+    this.xmpp.iqCallee.get(NS.DISCO_INFO, 'query', async ({ element }) =>
+      (await this.capabilities).info(element.attrs.node))
+    this.xmpp.iqCallee.set(JINGLE, 'jingle', async ({ stanza, element }) => {
+      try {
+        await receive(stanza.attrs.from, element)
+        return true // iqCallee sends an empty result for a handled request
+      } catch (error) {
+        return stanzaError(error.condition || 'internal-server-error', error.jingleCondition)
+      }
+    })
+  }
+
+  sendJingle (to, element) {
+    return this.xmpp.iqCaller.set(element, to)
+  }
+
+  async getIceServers () {
+    const configured = window.config.iceServers || []
+    try {
+      // If login discovery is still pending, ask for the services directly.
+      const info = this.discoInfoCache.get(this.jid.domain)
+      if (!info || info.features.includes(EXTDISCO)) {
+        const services = await this.xmpp.iqCaller.get(xml('services', { xmlns: EXTDISCO }), this.jid.domain, 5000)
+        if (services) return [...configured, ...iceServersFromServices(services)]
+      }
+    } catch {
+      // Calls on the LAN or with configured ICE servers can still connect.
+    }
+    return configured
   }
 
   parseJid (jid) {
@@ -113,7 +142,7 @@ class XmppClient {
     if (stanza.is('message')) {
       if (stanza.attrs.type === 'chat' || stanza.attrs.type === 'groupchat') {
         // parse stanza message
-        if (stanza.attrs.from === xmppClient.jid.bare && stanza.attrs.to === xmppClient.jid.full) {
+        if (stanza.attrs.from === this.jid.bare && stanza.attrs.to === this.jid.full) {
           // handling carbon sent/received (XEP-0280)
           let carbon = stanza.getChild('sent')
           if (!carbon) {
@@ -127,17 +156,17 @@ class XmppClient {
             stanza = message
           }
         }
-        xmppClient.parseMessage(stanza)
+        this.parseMessage(stanza)
       } else {
         const result = stanza.getChild('result')
         if (result) {
           // parse forwarded stanza message
           const forwarded = result.getChild('forwarded')
           const message = forwarded.getChild('message')
-          xmppClient.parseMessage(message)
+          this.parseMessage(message)
         }
         if (stanza.attrs.type === 'error') {
-          xmppClient.parseMessage(stanza)
+          this.parseMessage(stanza)
         }
       }
     } else if (stanza.is('presence')) {
@@ -146,7 +175,10 @@ class XmppClient {
         isSelf: false,
         type: stanza.attrs.type,
       }
-      presence.from = xmppClient.parseJid(stanza.attrs.from)
+      presence.from = this.parseJid(stanza.attrs.from)
+      const caps = stanza.getChild('c', CAPS)
+      presence.capsVersion = caps?.attrs.ver
+      presence.priority = Number(stanza.getChildText('priority')) || 0
       if (stanza.attrs.type === 'unavailable') {
         presence.show = 'off'
         presence.show = undefined
@@ -176,14 +208,14 @@ class XmppClient {
         })
         mucPresence.getChildren('status').map(status => {
           if (status.attrs.code === '201') {
-            xmppClient.callbacks.mucCreated.forEach((callback) => callback(presence))
+            this.callbacks.mucCreated.forEach((callback) => callback(presence))
           }
         })
       }
       if (import.meta.env.DEV && hasDebug) {
         console.debug('1-presence', presence, mucPresence)
       }
-      xmppClient.callbacks.presence.forEach((callback) => callback(presence))
+      this.callbacks.presence.forEach((callback) => callback(presence))
       // @TODO : handle muc joined
     }
   }
@@ -196,8 +228,8 @@ class XmppClient {
         console.debug('1-message', stanza)
       }
       message.body = body.getText()
-      message.from = xmppClient.parseJid(stanza.attrs.from)
-      message.to = xmppClient.parseJid(stanza.attrs.to || xmppClient.jid)
+      message.from = this.parseJid(stanza.attrs.from)
+      message.to = this.parseJid(stanza.attrs.to || this.jid)
       message.id = stanza.attrs.id
       message.type = stanza.attrs.type
       const stanzaIdNode = stanza.getChild('stanza-id')
@@ -233,7 +265,7 @@ class XmppClient {
         message.delay = new Date().toISOString()
       }
 
-      xmppClient.callbacks.chat.forEach((callback) => callback(message))
+      this.callbacks.chat.forEach((callback) => callback(message))
     }
 
     // check message fasten (XEP-0422)
@@ -251,7 +283,7 @@ class XmppClient {
             reason: reasonNode ? reasonNode.getText() : null,
             by: this.parseJid(moderation[0].attrs.by),
           }
-          xmppClient.callbacks.messageRetracted.forEach((callback) => callback(retracted))
+          this.callbacks.messageRetracted.forEach((callback) => callback(retracted))
         }
       }
     }
@@ -260,16 +292,16 @@ class XmppClient {
     const subjectNode = stanza.getChild('subject')
     if (subjectNode) {
       const subject = {
-        from: xmppClient.parseJid(stanza.attrs.from),
+        from: this.parseJid(stanza.attrs.from),
         subject: subjectNode.getText(),
       }
-      xmppClient.callbacks.subjectChange.forEach((callback) => callback(subject))
+      this.callbacks.subjectChange.forEach((callback) => callback(subject))
     }
 
     // handle reactions (part of XEP-0444)
     const reaction = stanza.getChild('reactions')
     if (reaction) {
-      const fromJid = xmppClient.parseJid(stanza.attrs.from)
+      const fromJid = this.parseJid(stanza.attrs.from)
       const parent = stanza.parent
       let datetime = null
       if (parent && parent.name === 'forwarded') {
@@ -284,7 +316,7 @@ class XmppClient {
       const from = stanza.attrs.type === 'groupchat' ? fromJid.resource : fromJid.local
       const originalMessageId = reaction.attrs.id
       const reactions = reaction.getChildren('reaction').map((reaction) => reaction.text())
-      xmppClient.callbacks.reactions.forEach((callback) => callback(originalMessageId, type, from, datetime, reactions))
+      this.callbacks.reactions.forEach((callback) => callback(originalMessageId, type, from, datetime, reactions))
     }
 
     // check message error
@@ -300,18 +332,18 @@ class XmppClient {
           })
           .join(', '),
       }
-      xmppClient.callbacks.messageSentError.forEach((callback) => callback(error))
+      this.callbacks.messageSentError.forEach((callback) => callback(error))
     }
 
     // check chat state
     const chatStateNodes = stanza.getChildrenByFilter(child => child.attrs && child.attrs.xmlns === NS.CHAT_STATE)
     if (chatStateNodes.length > 0) {
       const chatState = {
-        jid: xmppClient.parseJid(stanza.attrs.from),
+        jid: this.parseJid(stanza.attrs.from),
         type: stanza.attrs.type,
         chatState: chatStateNodes[0].getName(),
       }
-      xmppClient.callbacks.chatState.forEach((callback) => callback(chatState))
+      this.callbacks.chatState.forEach((callback) => callback(chatState))
     }
 
     if (import.meta.env.DEV && hasDebug) {
@@ -322,13 +354,13 @@ class XmppClient {
   async connect() {
     if (this.xmpp.status === 'offline') {
       this.jid = this.parseJid(await this.xmpp.start())
-      xmppClient.callbacks.authenticated.forEach((callback) => callback(this.jid))
+      this.callbacks.authenticated.forEach((callback) => callback(this.jid))
     }
     return this.jid
   }
 
   async disconnect() {
-    this.xmpp.stop()
+    return this.xmpp.stop()
   }
 
   on(type, callback) {
@@ -338,6 +370,10 @@ class XmppClient {
     if(this.callbacks[type]) {
       // use custom callback
       this.callbacks[type].push(callback)
+      return
+    }
+    if (type === 'resumed') {
+      this.xmpp.streamManagement.on(type, callback)
       return
     }
     // use default callback
@@ -376,6 +412,7 @@ class XmppClient {
         status,
       ) : null,
     )
+    if (this.capabilities) presenceMessage.append((await this.capabilities).presence())
     await this.xmpp.send(presenceMessage)
   }
 
@@ -445,7 +482,7 @@ class XmppClient {
     if (import.meta.env.DEV && hasDebug) {
       console.debug('1-message sent', sentMessage)
     }
-    xmppClient.callbacks.messageSent.forEach((callback) => callback(sentMessage))
+    this.callbacks.messageSent.forEach((callback) => callback(sentMessage))
   }
 
   // Send reaction (XEP-0444)
@@ -472,7 +509,7 @@ class XmppClient {
     await this.xmpp.send(reactionMessage)
     if (type === 'chat') {
       // forward reaction to user
-      xmppClient.callbacks.reactions.forEach((callback) => callback(messageId, type, this.jid.local, new Date(), reactions))
+      this.callbacks.reactions.forEach((callback) => callback(messageId, type, this.jid.local, new Date(), reactions))
     }
   }
 
@@ -578,16 +615,16 @@ class XmppClient {
   }
 
   // Service Discovery (XEP-0030)
-  async getDiscoInfo(to) {
+  async getDiscoInfo(to, cache = true) {
     if (to === undefined) {
       to = this.jid.domain
     }
-    if (Object.hasOwnProperty.call(discoInfoCache, to)) {
-      return discoInfoCache[to]
+    if (cache && this.discoInfoCache.has(to)) {
+      return this.discoInfoCache.get(to)
     }
     const discoInfoMessage =
       xml(
-        'iq', { type: 'get', from: xmppClient.jid.full, to },
+        'iq', { type: 'get', from: this.jid.full, to },
         xml(
           'query', { xmlns: NS.DISCO_INFO },
         ),
@@ -613,7 +650,7 @@ class XmppClient {
       console.debug('0-getDiscoInfo', to, result, discoInfo)
     }
     // cache result for further request
-    discoInfoCache[to] = discoInfo
+    if (cache) this.discoInfoCache.set(to, discoInfo)
     return discoInfo
   }
 
@@ -623,7 +660,7 @@ class XmppClient {
     }
     const discoItemsMessage =
       xml(
-        'iq', { type: 'get', from: xmppClient.jid.full, to },
+        'iq', { type: 'get', from: this.jid.full, to },
         xml(
           'query', { xmlns: NS.DISCO_ITEMS },
         ),
@@ -685,7 +722,7 @@ class XmppClient {
     }
     const slotRequestMessage =
       xml(
-        'iq', { type: 'get', from: xmppClient.jid.full, to },
+        'iq', { type: 'get', from: this.jid.full, to },
         xml(
           'request', { xmlns: NS.HTTP_UPLOAD, ...request },
         ),
@@ -753,7 +790,7 @@ class XmppClient {
   async getVCard(to) {
     const getVCardMessage =
     xml(
-      'iq', { type: 'get', from: xmppClient.jid.full, to },
+      'iq', { type: 'get', from: this.jid.full, to },
       xml(
         'vCard', { xmlns: NS.VCARD },
       ),
@@ -790,7 +827,7 @@ class XmppClient {
     // get original
     const getVCardMessage =
     xml(
-      'iq', { type: 'get', from: xmppClient.jid.full },
+      'iq', { type: 'get', from: this.jid.full },
       xml(
         'vCard', { xmlns: NS.VCARD },
       ),
@@ -882,7 +919,7 @@ class XmppClient {
   // Multi-User Chat (XEP-0045)
   async joinRoom(jid, nick, opts) {
     if (nick === null) {
-      nick = xmppClient.jid.local
+      nick = this.jid.local
     }
     const roomPresenceMessage = xml(
       'presence', {

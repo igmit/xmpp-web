@@ -13,6 +13,11 @@ let jidDomain = 'domain-xmpp.ltd'
 let mockServer
 
 const onBeforeLoad = (win) => {
+  // Keep the preview's service worker from serving a cached page outside Cypress's proxy.
+  // Every navigation in this suite needs its test WebSocket installed before the app starts.
+  if (win.navigator.serviceWorker) {
+    cy.stub(win.navigator.serviceWorker, 'register').rejects(new Error('Service worker disabled in mock XMPP tests'))
+  }
   // stub websocket requests
   cy.stub(win, 'WebSocket').callsFake(url => {
     return new WebSocket(url)
@@ -130,6 +135,67 @@ describe('XMPP Web for registered users', () => {
       const msg = 'This is code block:\n``` js\n' + code + '\n```'
       mockServer.emit('message', `<message type="chat" to="${jidLocal}@${jidDomain}" from="user2@${jidDomain}/dummyClient" id="code-block" xmlns="jabber:client"><body>${msg}</body><active xmlns="http://jabber.org/protocol/chatstates"/><origin-id xmlns="urn:xmpp:sid:0" id="code-block"/></message>`)
       cy.get('#messages-container div:last-child pre code').should('have.text', code)
+    })
+  })
+
+  describe('Calls', function () {
+    const audioCall = 'button[aria-label="Start audio call"]'
+    const videoCall = 'button[aria-label="Start video call"]'
+    const callPanel = '[aria-label="Call controls"]'
+
+    it('shows call controls when a contact has a callable resource', () => {
+      cy.get(audioCall).should('not.exist')
+      cy.get(videoCall).should('not.exist')
+      cy.then(() => {
+        mockServer.emit('message', `<presence from="user2@${jidDomain}/callClient" xmlns="jabber:client"/>`)
+      })
+      cy.get(audioCall).should('be.enabled')
+      cy.get(videoCall).should('be.enabled')
+    })
+
+    it('shows a media permission failure and lets the user dismiss it', () => {
+      cy.window().then(win => {
+        cy.stub(win.navigator.mediaDevices, 'getUserMedia')
+          .rejects(new win.DOMException('Permission denied', 'NotAllowedError'))
+          .as('getUserMedia')
+      })
+      cy.get(audioCall).click()
+      cy.get('@getUserMedia').should('have.been.calledOnce')
+      cy.get(callPanel).should('contain', 'Call ended')
+        .find('[role="alert"]').should('be.visible')
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.get(callPanel).should('not.exist')
+      cy.get(audioCall).should('be.enabled')
+    })
+
+    it('keeps the call controls available when navigating away from the chat', () => {
+      cy.window().then(win => {
+        cy.stub(win.navigator.mediaDevices, 'getUserMedia').returns(new Promise(() => {}))
+      })
+      cy.get(videoCall).click()
+      cy.get(callPanel).should('contain', 'Starting video call')
+      cy.get(audioCall).should('be.disabled')
+      cy.get('.navbar-brand .navbar-item').first().click()
+      cy.hash().should('eq', '#/')
+      cy.get(videoCall).should('not.exist')
+      cy.contains(`${callPanel} button`, 'Cancel call').click()
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.get(callPanel).should('not.exist')
+      cy.get('#contactsList li').first().click()
+      cy.get(videoCall).should('be.enabled')
+    })
+
+    it('keeps audio available while another capable device is online', () => {
+      cy.then(() => {
+        mockServer.emit('message', `<presence from="user2@${jidDomain}/audioClient" xmlns="jabber:client"/>`)
+        mockServer.emit('message', `<presence from="user2@${jidDomain}/callClient" type="unavailable" xmlns="jabber:client"/>`)
+      })
+      cy.get(videoCall).should('not.exist')
+      cy.get(audioCall).should('be.enabled')
+      cy.then(() => {
+        mockServer.emit('message', `<presence from="user2@${jidDomain}/audioClient" type="unavailable" xmlns="jabber:client"/>`)
+      })
+      cy.get(audioCall).should('not.exist')
     })
   })
 

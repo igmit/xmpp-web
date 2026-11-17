@@ -1,0 +1,366 @@
+import assert from 'node:assert/strict'
+import { afterEach, beforeEach, test } from 'node:test'
+import { setImmediate, setTimeout } from 'node:timers/promises'
+import { xml } from '@xmpp/client'
+import JingleCall from '../src/services/JingleCall.js'
+import { JINGLE } from '../src/services/jingleNamespaces.js'
+import { descriptionToJingle } from '../src/services/jingleMedia.js'
+
+const ALICE = 'alice@example.org/Browser'
+const BOB = 'bob@example.org/Browser'
+const ICE = 'urn:xmpp:jingle:transports:ice-udp:1'
+const fingerprint = Array(32).fill('A1').join(':')
+const candidate = 'candidate:1 1 UDP 2122260223 192.0.2.1 50900 typ host generation 0'
+
+function offerSdp (video) {
+  const media = (kind, mid, id, codec) => [
+    `m=${kind} 9 UDP/TLS/RTP/SAVPF ${id}`, 'c=IN IP4 0.0.0.0', `a=mid:${mid}`, 'a=sendrecv', 'a=rtcp-mux',
+    'a=ice-ufrag:test', 'a=ice-pwd:abcdefghijklmnopqrstuvwxyz', 'a=setup:actpass',
+    `a=fingerprint:sha-256 ${fingerprint}`, `a=rtpmap:${id} ${codec}`,
+  ]
+  return [
+    'v=0', 'o=- 123 1 IN IP4 127.0.0.1', 's=-', 't=0 0',
+    ...(video ? ['a=group:BUNDLE 0 1'] : []),
+    ...media('audio', 0, 111, 'opus/48000/2'),
+    ...(video ? media('video', 1, 96, 'VP8/90000') : []),
+    '',
+  ].join('\r\n')
+}
+
+function setup (ownJid, options = {}) {
+  const sent = []
+  const states = []
+  const controller = new JingleCall({
+    ownJid,
+    send: async (peer, stanza) => sent.push({ peer, stanza }),
+    onChange: state => states.push(state),
+    ...options,
+  })
+  return { controller, sent, states }
+}
+
+function request (action, sid, ...children) {
+  return xml('jingle', { xmlns: JINGLE, action, sid }, ...children)
+}
+
+class FakeTrack {
+  constructor (kind) {
+    this.kind = kind
+    this.stopped = false
+  }
+
+  stop () { this.stopped = true }
+}
+
+class FakeStream {
+  constructor (tracks = []) { this.tracks = tracks }
+  getTracks () { return this.tracks }
+  addTrack (track) { this.tracks.push(track) }
+}
+
+class FakePeer extends EventTarget {
+  constructor (config) {
+    super()
+    this.config = config
+    this.tracks = []
+    this.candidates = []
+    this.connectionState = 'new'
+    this.iceGatheringState = 'new'
+    FakePeer.instances.push(this)
+  }
+
+  addTrack (track) { this.tracks.push(track) }
+
+  async createOffer () {
+    return { type: 'offer', sdp: offerSdp(this.tracks.some(track => track.kind === 'video')) }
+  }
+
+  async createAnswer () {
+    return { type: 'answer', sdp: this.remoteDescription.sdp.replaceAll('a=setup:actpass', 'a=setup:active') }
+  }
+
+  async setLocalDescription (description) {
+    this.localDescription = description
+    this.iceGatheringState = 'gathering'
+  }
+
+  async setRemoteDescription (description) { this.remoteDescription = description }
+
+  finishGathering () {
+    this.localDescription.sdp += `a=${candidate}\r\n`
+    this.iceGatheringState = 'complete'
+    this.dispatchEvent(new Event('icegatheringstatechange'))
+  }
+
+  async addIceCandidate (value) { this.candidates.push(value) }
+
+  connect () {
+    this.connectionState = 'connected'
+    this.onconnectionstatechange?.()
+  }
+
+  close () { this.connectionState = 'closed' }
+}
+
+const globals = ['navigator', 'MediaStream', 'RTCPeerConnection']
+const descriptors = globals.map(key => Object.getOwnPropertyDescriptor(globalThis, key))
+let captureRequests
+
+function mockCapture (getUserMedia) {
+  Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia } } })
+}
+
+beforeEach(() => {
+  captureRequests = []
+  FakePeer.instances = []
+  mockCapture(async constraints => {
+    captureRequests.push(constraints)
+    return new FakeStream([new FakeTrack('audio'), ...(constraints.video ? [new FakeTrack('video')] : [])])
+  })
+  globalThis.MediaStream = FakeStream
+  globalThis.RTCPeerConnection = FakePeer
+})
+
+afterEach(() => {
+  globals.forEach((key, index) => {
+    if (descriptors[index]) Object.defineProperty(globalThis, key, descriptors[index])
+    else delete globalThis[key]
+  })
+})
+
+for (const video of [false, true]) {
+  test(`connects and ends a ${video ? 'video and audio' : 'voice'} call after gathering ICE`, async t => {
+    const iceServers = [{ urls: 'turn:turn.example.org', username: 'user', credential: 'credential' }]
+    const alice = setup(ALICE, { iceServers: async () => iceServers })
+    const bob = setup(BOB)
+    t.after(() => {
+      alice.controller.reset()
+      bob.controller.reset()
+    })
+
+    const starting = alice.controller.start(BOB, video)
+    assert.equal(alice.states.at(-1).phase, 'outgoing')
+    await setImmediate()
+    const [alicePc] = FakePeer.instances
+    assert.deepEqual(alicePc.config.iceServers, iceServers)
+    assert.equal(alice.sent.length, 0)
+    alicePc.finishGathering()
+    await starting
+
+    const offer = alice.sent[0].stanza
+    assert.equal(offer.attrs.action, 'session-initiate')
+    assert.equal(offer.attrs.initiator, ALICE)
+    assert.equal(alice.sent[0].peer, BOB)
+    assert.equal(offer.getChildren('content').length, video ? 2 : 1)
+    assert.ok(offer.getChildren('content').at(-1).getChild('transport', ICE).getChild('candidate', ICE))
+    await bob.controller.receive(ALICE, offer)
+    assert.equal(bob.states.at(-1).phase, 'incoming')
+    assert.equal(bob.states.at(-1).video, video)
+    assert.equal(captureRequests.length, 1)
+
+    const accepting = bob.controller.accept()
+    assert.equal(bob.states.at(-1).phase, 'connecting')
+    await setImmediate()
+    const bobPc = FakePeer.instances[1]
+    assert.deepEqual(captureRequests, [{ audio: true, video }, { audio: true, video }])
+    bobPc.finishGathering()
+    await accepting
+
+    const answer = bob.sent.find(({ stanza }) => stanza.attrs.action === 'session-accept').stanza
+    assert.equal(answer.attrs.sid, offer.attrs.sid)
+    assert.equal(answer.attrs.responder, BOB)
+    await alice.controller.receive(BOB, answer)
+    assert.equal(alice.states.at(-1).phase, 'connecting')
+    alicePc.connect()
+    bobPc.connect()
+    assert.equal(alice.states.at(-1).phase, 'active')
+    assert.equal(bob.states.at(-1).phase, 'active')
+    const remoteTrack = new FakeTrack('audio')
+    alicePc.ontrack({ track: remoteTrack })
+    assert.deepEqual(alice.states.at(-1).remoteStream.getTracks(), [remoteTrack])
+
+    await alice.controller.end()
+    const goodbye = alice.sent.at(-1).stanza
+    assert.equal(goodbye.attrs.action, 'session-terminate')
+    assert.ok(goodbye.getChild('reason').getChild('success'))
+    await bob.controller.receive(ALICE, goodbye)
+    for (const [call, pc] of [[alice, alicePc], [bob, bobPc]]) {
+      assert.equal(call.states.at(-1).phase, 'ended')
+      assert.equal(call.states.at(-1).localStream, null)
+      assert.equal(call.states.at(-1).remoteStream, null)
+      assert.equal(pc.connectionState, 'closed')
+      assert.ok(pc.tracks.every(track => track.stopped))
+    }
+    assert.ok(remoteTrack.stopped)
+    await alice.controller.end()
+    assert.equal(alice.states.at(-1), null)
+  })
+}
+
+test('buffers valid trickle ICE and rejects actions from another resource or session', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const offer = request('session-initiate', 'main', ...descriptionToJingle(offerSdp(false), 'initiator'))
+  await bob.controller.receive(ALICE, offer)
+  const content = xml('content', { creator: 'initiator', name: '0' }, xml('transport', { xmlns: ICE, ufrag: 'test' },
+    xml('candidate', { foundation: '1', component: '1', protocol: 'udp', priority: '2122260223', ip: '192.0.2.2', port: '50901', type: 'host' })))
+  const trickle = request('transport-info', 'main', content)
+  await assert.rejects(bob.controller.receive('alice@example.org/Other', trickle), { condition: 'item-not-found', jingleCondition: 'unknown-session' })
+  await assert.rejects(bob.controller.receive(ALICE, request('session-terminate', 'old')), { condition: 'item-not-found', jingleCondition: 'unknown-session' })
+  await assert.rejects(bob.controller.receive(ALICE, request('session-accept', 'main')), { condition: 'unexpected-request', jingleCondition: 'out-of-order' })
+  await bob.controller.receive(ALICE, trickle)
+  assert.equal(FakePeer.instances.length, 0)
+
+  const accepting = bob.controller.accept()
+  await setImmediate()
+  const [pc] = FakePeer.instances
+  assert.deepEqual(pc.candidates.map(value => value.sdpMid), ['0'])
+  assert.match(pc.candidates[0].candidate, /192\.0\.2\.2/)
+  pc.finishGathering()
+  await accepting
+})
+
+test('signals busy for another call and decline for the currently ringing call', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const offer = sid => request('session-initiate', sid, ...descriptionToJingle(offerSdp(false), 'initiator'))
+  const other = 'carol@example.org/Browser'
+  await bob.controller.receive(ALICE, offer('main'))
+  await bob.controller.receive(other, offer('second'))
+  await setTimeout(5)
+  const busy = bob.sent.find(({ peer }) => peer === other).stanza
+  assert.equal(busy.attrs.sid, 'second')
+  assert.ok(busy.getChild('reason').getChild('busy'))
+  assert.equal(bob.states.at(-1).peer, ALICE)
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+
+  await bob.controller.end()
+  const decline = bob.sent.at(-1).stanza
+  assert.equal(decline.attrs.sid, 'main')
+  assert.ok(decline.getChild('reason').getChild('decline'))
+  assert.equal(captureRequests.length, 0)
+})
+
+test('cleans up a stale permission request after canceling the outgoing call', async t => {
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  let grant
+  mockCapture(() => new Promise(resolve => { grant = resolve }))
+  const starting = alice.controller.start(BOB)
+  await alice.controller.end()
+  await starting
+  assert.equal(alice.states.at(-1).reason, 'cancel')
+  assert.equal(alice.sent.length, 0)
+
+  const track = new FakeTrack('audio')
+  grant(new FakeStream([track]))
+  await setImmediate()
+  assert.ok(track.stopped)
+  assert.equal(FakePeer.instances.length, 0)
+})
+
+test('cancels an async ICE lookup and closes captured media on disconnect', async t => {
+  let resolveIceServers
+  const alice = setup(ALICE, { iceServers: () => new Promise(resolve => { resolveIceServers = resolve }) })
+  t.after(() => alice.controller.reset())
+  const track = new FakeTrack('audio')
+  mockCapture(async () => new FakeStream([track]))
+  const starting = alice.controller.start(BOB)
+  await setImmediate()
+  alice.controller.reset()
+  await starting
+  assert.equal(alice.states.at(-1), null)
+  assert.ok(track.stopped)
+  resolveIceServers([])
+  await setImmediate()
+  assert.equal(alice.sent.length, 0)
+  assert.equal(FakePeer.instances.length, 0)
+})
+
+test('reports denied camera permission after acceptance and signals a failed session', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  mockCapture(async () => { throw new DOMException('Permission denied', 'NotAllowedError') })
+  await bob.controller.receive(ALICE, request('session-initiate', 'offer', ...descriptionToJingle(offerSdp(true), 'initiator')))
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+  await bob.controller.accept()
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.match(bob.states.at(-1).error, /microphone and camera access/)
+  assert.ok(bob.sent.at(-1).stanza.getChild('reason').getChild('failed-application'))
+  assert.equal(FakePeer.instances.length, 0)
+})
+
+test('uses already gathered candidates when an ICE server stalls', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  const starting = alice.controller.start(BOB)
+  await setImmediate()
+  const [pc] = FakePeer.instances
+  pc.localDescription.sdp += `a=${candidate}\r\n`
+  t.mock.timers.tick(15000)
+  await starting
+  assert.equal(alice.sent[0].stanza.attrs.action, 'session-initiate')
+  assert.equal(alice.states.at(-1).phase, 'outgoing')
+})
+
+test('closes media when ICE gathering times out without a candidate', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  const starting = alice.controller.start(BOB)
+  await setImmediate()
+  const [pc] = FakePeer.instances
+  t.mock.timers.tick(15000)
+  await starting
+  assert.equal(alice.sent.length, 0)
+  assert.equal(alice.states.at(-1).phase, 'ended')
+  assert.match(alice.states.at(-1).error, /Timed out while gathering/)
+  assert.ok(pc.tracks.every(track => track.stopped))
+  assert.equal(pc.connectionState, 'closed')
+})
+
+test('resolves simultaneous equivalent calls by the lower session ID', async t => {
+  const alice = setup(ALICE)
+  const bob = setup(BOB)
+  t.after(() => {
+    alice.controller.reset()
+    bob.controller.reset()
+  })
+  const starting = Promise.all([alice.controller.start(BOB), bob.controller.start(ALICE)])
+  await setImmediate()
+  FakePeer.instances.forEach(pc => pc.finishGathering())
+  await starting
+
+  const aliceOffer = alice.sent[0].stanza
+  const bobOffer = bob.sent[0].stanza
+  const [winner, loser, winningOffer, losingOffer] = aliceOffer.attrs.sid <= bobOffer.attrs.sid
+    ? [alice, bob, aliceOffer, bobOffer]
+    : [bob, alice, bobOffer, aliceOffer]
+  await assert.rejects(winner.controller.receive(losingOffer.attrs.initiator, losingOffer), { condition: 'conflict', jingleCondition: 'tie-break' })
+  await loser.controller.receive(winningOffer.attrs.initiator, winningOffer)
+  assert.equal(winner.states.at(-1).phase, 'outgoing')
+  assert.equal(loser.states.at(-1).phase, 'incoming')
+  assert.equal(loser.states.at(-1).localStream, null)
+  const loserPc = FakePeer.instances[loser === alice ? 0 : 1]
+  assert.equal(loserPc.connectionState, 'closed')
+  assert.ok(loserPc.tracks.every(track => track.stopped))
+})
+
+test('accepts a same-peer invitation while the local outgoing offer is unsent', async t => {
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  let grant
+  mockCapture(() => new Promise(resolve => { grant = resolve }))
+  const starting = alice.controller.start(BOB)
+  const incoming = request('session-initiate', 'z'.repeat(32), ...descriptionToJingle(offerSdp(false), 'initiator'))
+  await alice.controller.receive(BOB, incoming)
+  await starting
+  assert.equal(alice.states.at(-1).phase, 'incoming')
+
+  const track = new FakeTrack('audio')
+  grant(new FakeStream([track]))
+  await setImmediate()
+  assert.ok(track.stopped)
+  assert.ok(!alice.sent.some(({ stanza }) => stanza.attrs.action === 'session-initiate'))
+})

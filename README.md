@@ -31,6 +31,7 @@ Lightweight web chat client for XMPP server.
 
 - Connect to an XMPP server with WebSocket,
 - Chat and groupchat (MUC as defined in XEP-0045),
+- Make one-to-one audio and video calls with Jingle and WebRTC,
 - Retrieve contacts (roster) and bookmarked rooms (XEP-0048),
 - Send and receive files over HTTP (XEP-0066, XEP-0363),
 - Handle password protected room,
@@ -150,6 +151,7 @@ Use `docker pull nioc/xmpp-web:latest` and check if there is some new environmen
 | `isStylingDisabled`       | `APP_IS_STYLING_DISABLED`        | `false`                                      | Set to `true` for disable messages styling                                                                                                                     |
 | `hasSendingEnterKey`      | `APP_HAS_SENDING_ENTER_KEY`      | `false`                                      | If `true`, `Enter` key sends message, it adds new line otherwise (`Control`+`Enter` always sends message)                                                      |
 | `connectTimeout`          | `XMPP_CONNECT_TIMEOUT`           | `5000`                                       | Timeout in ms before XMPP connection is considered as rejected                                                                                                 |
+| `iceServers`              | `APP_ICE_SERVERS`                | `[]`                                         | Additional WebRTC ICE servers, as a single-line JSON array of RTCIceServer objects |
 | `pinnedMucs`              | `APP_PINNED_MUCS`                | `[]`                                         | Jid MUC list to hightlight in guest rooms page, ex: `['welcome@conference.domain.ltd', 'vip@conference.domain.ltd']`                                           |
 | `logoUrl`                 | `APP_LOGO_URL`                   | `''`                                         | Custom logo URL for login/guest pages                                                                                                                          |
 | `guestDescription`        | `APP_GUEST_DESCRIPTION`          | `''`                                         | Welcome text for guests (allows some HTML tags like `<p>`, `<a>`, `<b>`, see [allowed tags list](https://www.npmjs.com/package/sanitize-html#default-options)) |
@@ -157,6 +159,14 @@ Use `docker pull nioc/xmpp-web:latest` and check if there is some new environmen
 | `sso.jidHeader`           | `APP_SSO_JID_HEADER`             | `"jid"`                                      | Header containing JID after SSO request                                                                                                                        |
 | `sso.passwordHeader`      | `APP_SSO_PASSWORD_HEADER`        | `"password"`                                 | Header containing password after SSO request                                                                                                                   |
 | N/A                       | `XMPP_WS`                        | `''`                                         | Websocket endpoint proxyfied by Nginx (on a docker installation)                                                                                               |
+
+### One-to-one calls
+
+Open a direct chat with a roster contact. The phone and camera buttons appear when an online device advertises the corresponding Jingle RTP capability. Incoming calls can be answered or declined from any registered-user page. The browser requests microphone access for audio calls and microphone and camera access for video calls. Serve the client over HTTPS or localhost so the browser can grant access.
+
+The client sends a Jingle invitation directly to the selected full JID. If several devices support the call, it chooses the one with the highest presence priority. Peers must support direct Jingle IQ initiation, RTP, ICE-UDP and DTLS-SRTP. Message-based invitations (XEP-0353) are outside this implementation.
+
+For calls across different networks, configure STUN and TURN on your XMPP server using External Service Discovery (XEP-0215). The client requests the advertised services at call time, including temporary TURN credentials. You can also supply servers in `local.js` or with `APP_ICE_SERVERS` in Docker, for example `[{"urls":"stun:stun.example.org:3478"}]`. Values in `local.js` are visible to browsers. Keep the TURN shared secret on the server. With the default empty list and no advertised service, calls depend on a direct network path.
 
 ## Contributing
 

@@ -10,6 +10,12 @@
         <room-configuration-button v-if="isRoom && !$xmpp.isAnonymous" />
         <invite-guest-button v-if="hasGuestInviteLink" />
         <retrieve-history-button />
+        <button v-if="canStartAudioCall" type="button" class="button is-primary-ghost has-no-border is-shadowless" title="Start audio call" aria-label="Start audio call" :disabled="hasOpenCall" @click="$xmpp.startCall(jid, false)">
+          <span class="icon"><i class="fa-solid fa-phone" aria-hidden="true" /></span>
+        </button>
+        <button v-if="canStartVideoCall" type="button" class="button is-primary-ghost has-no-border is-shadowless" title="Start video call" aria-label="Start video call" :disabled="hasOpenCall" @click="$xmpp.startCall(jid, true)">
+          <span class="icon"><i class="fa-solid fa-video" aria-hidden="true" /></span>
+        </button>
         <presence-controller v-if="$xmpp.isAnonymous" :is-navbar-item="false" :is-right="true" class="px-2 mx-2" />
       </span>
     </div>
@@ -103,6 +109,18 @@ export default {
     ]),
     hasGuestInviteLink () {
       return window.config.hasGuestAccess && this.isRoom
+    },
+    isRegisteredDirectChat () {
+      return this.jid && !this.isRoom && !this.$xmpp.isAnonymous
+    },
+    canStartAudioCall () {
+      return this.isRegisteredDirectChat && this.$store.canCall(this.jid, false)
+    },
+    canStartVideoCall () {
+      return this.isRegisteredDirectChat && this.$store.canCall(this.jid, true)
+    },
+    hasOpenCall () {
+      return this.$store.call && this.$store.call.phase !== 'ended'
     },
   },
   // watch route param to force component update

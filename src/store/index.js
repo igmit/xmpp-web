@@ -6,6 +6,8 @@ let showNotification = null
 const getDefaultState = () => {
   return {
     activeChat: null,
+    call: null,
+    callResources: [],
     messages: [],
     reactions: [],
     contacts: [],
@@ -32,6 +34,18 @@ export const useStore = defineStore('main', {
   },
 
   getters: {
+
+    callTarget: (state) => (jid, video) => {
+      if (!state.isOnline) return null
+      const resources = state.callResources.filter(resource =>
+        resource.bare === jid && resource.audio && (!video || resource.video))
+      resources.sort((a, b) => b.priority - a.priority || a.full.localeCompare(b.full))
+      return resources[0]?.full || null
+    },
+
+    canCall () {
+      return (jid, video) => !!this.callTarget(jid, video)
+    },
 
     publicRooms: (state) => {
       return state.knownRooms.filter((room) => room.isPublic)

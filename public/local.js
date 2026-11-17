@@ -17,6 +17,7 @@ var config = {
   isStylingDisabled: false,
   hasSendingEnterKey: false,
   connectTimeout: 5000,
+  iceServers: [],
   pinnedMucs: [],
   logoUrl: '',
   sso: {

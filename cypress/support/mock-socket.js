@@ -39,6 +39,19 @@ export function MockServer({ url, jidLocal, jidDomain } ) {
       if (data.endsWith('<query xmlns="http://jabber.org/protocol/disco#info"/></iq>')) {
         const result = /<iq type="get" from=".+" to="(\S+)" id="(\S+)" xmlns="jabber:client"><query xmlns="http:\/\/jabber.org\/protocol\/disco#info"\/><\/iq>/.exec(data)
         switch (result[1]) {
+          case `user2@${jidDomain}/audioClient`:
+          case `user2@${jidDomain}/callClient`: {
+            const features = [
+              'urn:xmpp:jingle:1',
+              'urn:xmpp:jingle:transports:ice-udp:1',
+              'urn:xmpp:jingle:apps:dtls:0',
+              'urn:xmpp:jingle:apps:rtp:1',
+              'urn:xmpp:jingle:apps:rtp:audio',
+              ...(result[1].endsWith('/callClient') ? ['urn:xmpp:jingle:apps:rtp:video'] : []),
+            ].map(feature => `<feature var='${feature}'/>`).join('')
+            socket.send(`<iq type='result' id='${result[2]}' to='${jidLocal}@${jidDomain}/${resource}' from='${result[1]}' xmlns='jabber:client'><query xmlns='http://jabber.org/protocol/disco#info'>${features}</query></iq>`)
+            break
+          }
           case jidDomain:
             socket.send(`<iq type='result' id='${result[2]}' to='${jidLocal}@${jidDomain}/${resource}' from='@${jidDomain}' xmlns='jabber:client'><query xmlns='http://jabber.org/protocol/disco#info'><identity name='XMPP server' type='file' category='store'/><identity name='XMPP server' type='im' category='server'/><identity name='XMPP server' type='pep' category='pubsub'/><identity name='XMPP server' type='bytestreams' category='proxy'/><feature var='msgoffline'/><feature var='urn:xmpp:blocking'/><feature var='urn:xmpp:time'/><feature var='jabber:iq:time'/><feature var='jabber:iq:last'/><feature var='vcard-temp'/><feature var='jabber:iq:roster'/><feature var='urn:xmpp:http:upload:0'/><feature var='urn:xmpp:http:upload'/><feature var='urn:xmpp:carbons:2'/><feature var='http://jabber.org/protocol/disco#info'/><feature var='http://jabber.org/protocol/disco#items'/><feature var='urn:xmpp:ping'/><feature var='jabber:iq:version'/><feature var='http://jabber.org/protocol/commands'/><feature var='http://jabber.org/protocol/pubsub#publish'/><feature var='jabber:iq:private'/><feature var='http://jabber.org/protocol/bytestreams'/><feature var='jabber:iq:register'/><x xmlns='jabber:x:data' type='result'><field type='hidden' var='FORM_TYPE'><value>urn:xmpp:http:upload:0</value></field><field type='text-single' var='max-file-size'><value>10485760</value></field></x><x xmlns='jabber:x:data' type='result'><field type='hidden' var='FORM_TYPE'><value>urn:xmpp:http:upload</value></field><field type='text-single' var='max-file-size'><value>10485760</value></field></x></query></iq>`)
             break
@@ -78,7 +91,7 @@ export function MockServer({ url, jidLocal, jidDomain } ) {
         }
         return
       }
-      if (data === '<presence xmlns="jabber:client"><show/></presence>') {
+      if (data.startsWith('<presence xmlns="jabber:client"><show/>')) {
         socket.send(`<presence from='${jidLocal}@${jidDomain}/${resource}' xmlns='jabber:client'><show/><x xmlns='vcard-temp:x:update'><photo>5ac6c95fb8a84b58cf43945882d5b993b7b404cd</photo></x></presence>`)
         return
       }

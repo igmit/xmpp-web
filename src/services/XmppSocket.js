@@ -1,5 +1,6 @@
 import { XmppClient as XMPP, NS } from './XmppClient'
 import defaultAvatar from '../assets/defaultAvatar'
+import { JINGLE, RTP, AUDIO, VIDEO, ICE, DTLS } from './jingleNamespaces.js'
 
 const transports = window.config.transports
 const resource = window.config.resource
@@ -26,6 +27,7 @@ export default {
   fullJid: null,
   context: null,
   client: null,
+  calls: null,
   nick: null,
   isAnonymous: true,
   defaultDomain,
@@ -34,11 +36,11 @@ export default {
   // create XMPP client with credentials and context
   async create (jid, password, domain, transportsUser, context) {
     // clear previous session
+    await this.disconnect()
     this.nick = null
     this.fullJid = null
     this.jid = null
     this.context = context
-    this.disconnect()
 
     // handle anonymous authentication
     if (jid) {
@@ -74,6 +76,36 @@ export default {
       password,
     })
 
+    if (!this.isAnonymous && window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia) {
+      const client = this.client
+      const { default: JingleCall } = await import('./JingleCall')
+      const bindCalls = jid => {
+        if (client !== this.client) return
+        this.calls = new JingleCall({
+          ownJid: jid.toString(),
+          send: (peer, jingle) => client.sendJingle(peer, jingle),
+          onChange: call => { this.context.$store.call = call },
+          iceServers: () => client.getIceServers(),
+        })
+      }
+      client.on('online', jid => {
+        if (client !== this.client) return
+        this.context.$store.callResources = []
+        bindCalls(jid)
+      })
+      client.on('resumed', () => bindCalls(client.jid.full))
+      client.enableCalls((peer, jingle) => {
+        if (this.client !== client || !this.calls) {
+          throw Object.assign(new Error('Offline'), { condition: 'service-unavailable' })
+        }
+        if (!peer) throw Object.assign(new Error('Missing sender'), { condition: 'bad-request' })
+        const from = client.parseJid(peer)
+        if (!from.resource || !this.context.$store.contacts.some(contact => contact.jid === from.bare)) {
+          throw Object.assign(new Error('Unknown contact'), { condition: 'forbidden' })
+        }
+        return this.calls.receive(from.full, jingle)
+      })
+    }
   },
 
   // connect client to XMPP server
@@ -141,14 +173,22 @@ export default {
       })
     }
 
-
-
-    this.client.on('online', () => {
+    const client = this.client
+    this.client.on('online', (jid) => {
+      if (client !== this.client) return
+      this.fullJid = client.parseJid(jid)
+      client.jid = this.fullJid
+      client.sendPresence().catch(error => logError(error, 'error', 'presence after reconnect'))
       console.info('XMPP online')
       this.context.$store.setOnline(true)
     })
+    client.on('resumed', () => {
+      if (client === this.client) this.context.$store.setOnline(true)
+    })
     this.client.on('status', (status) => {
-      if (status === 'close' || status === 'disconnect') {
+      if (client !== this.client) return
+      if (status === 'close' || status === 'disconnect' || status === 'offline') {
+        this.clearCalls()
         if (this.context.$store.isOnline) {
           console.warn('XMPP connection is closed')
           this.context.$store.setOnline(false)
@@ -293,6 +333,7 @@ export default {
         })
         return
       }
+      this.updateCallResource(presence)
       // contact presence commit to store
       this.context.$store.setContactPresence({ jid: fullJid.bare, presence: presence.show, status: presence.status })
     })
@@ -347,11 +388,70 @@ export default {
     })
   },
 
+  clearCalls () {
+    this.calls?.reset()
+    this.calls = null
+  },
+
+  async updateCallResource ({ from, type, capsVersion, priority }) {
+    if (!this.calls || !from.resource) return
+    const store = this.context.$store
+    if (!store.contacts.some(contact => contact.jid === from.bare)) return
+    const existing = store.callResources.find(resource => resource.full === from.full)
+    if (type === 'unavailable') {
+      store.callResources = store.callResources.filter(resource => resource !== existing)
+      if (store.call?.peer === from.full && store.call.phase !== 'ended') this.calls.end()
+      return
+    }
+    if (type) return
+    if (existing && existing.capsVersion === capsVersion) {
+      existing.priority = priority
+      return
+    }
+    // A resource can disappear or change capabilities while its disco request is in flight.
+    // Only its own entry is updated when the reply arrives.
+    const resource = { bare: from.bare, full: from.full, priority, capsVersion, audio: false, video: false }
+    store.callResources = [...store.callResources.filter(item => item !== existing), resource]
+    const entry = store.callResources.find(item => item.full === from.full)
+    try {
+      const { features } = await this.client.getDiscoInfo(from.full, false)
+      entry.audio = [JINGLE, RTP, ICE, DTLS, AUDIO].every(feature => features.includes(feature))
+      entry.video = entry.audio && features.includes(VIDEO)
+    } catch {
+      store.callResources = store.callResources.filter(item => item !== entry)
+    }
+  },
+
+  startCall (jid, video) {
+    const peer = this.context.$store.callTarget(jid, video)
+    if (peer && this.calls) return this.calls.start(peer, video)
+  },
+
+  acceptCall () {
+    return this.calls?.accept()
+  },
+
+  endCall () {
+    return this.calls?.end()
+  },
+
+  dismissCall () {
+    if (this.context.$store.call?.phase === 'ended') this.calls?.reset()
+  },
+
   async disconnect () {
     if (this.context && this.client) {
+      const client = this.client
+      if (this.calls && this.context.$store.call && this.context.$store.call.phase !== 'ended') {
+        // Queue session-terminate before closing the stream. Waiting for its IQ result
+        // could hold logout open after the remote device has already gone away.
+        this.calls.end()
+      }
+      this.client = null
+      this.clearCalls()
+      this.context.$store.clear()
       try {
-        await this.client.disconnect()
-        this.context.$store.clear()
+        await client.disconnect()
       } catch (error) {
         logError(error, 'error', 'disconnect error', error.message, error)
       }
