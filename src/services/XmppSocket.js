@@ -78,33 +78,8 @@ export default {
 
     if (!this.isAnonymous && window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia) {
       const client = this.client
-      const { default: JingleCall } = await import('./JingleCall')
-      const bindCalls = jid => {
-        if (client !== this.client) return
-        this.calls = new JingleCall({
-          ownJid: jid.toString(),
-          send: (peer, jingle) => client.sendJingle(peer, jingle),
-          onChange: call => { this.context.$store.call = call },
-          iceServers: () => client.getIceServers(),
-        })
-      }
-      client.on('online', jid => {
-        if (client !== this.client) return
-        this.context.$store.callResources = []
-        bindCalls(jid)
-      })
-      client.on('resumed', () => bindCalls(client.jid.full))
-      client.enableCalls((peer, jingle) => {
-        if (this.client !== client || !this.calls) {
-          throw Object.assign(new Error('Offline'), { condition: 'service-unavailable' })
-        }
-        if (!peer) throw Object.assign(new Error('Missing sender'), { condition: 'bad-request' })
-        const from = client.parseJid(peer)
-        if (!from.resource || !this.context.$store.contacts.some(contact => contact.jid === from.bare)) {
-          throw Object.assign(new Error('Unknown contact'), { condition: 'forbidden' })
-        }
-        return this.calls.receive(from.full, jingle)
-      })
+      const { registerJingleCalls } = await import('./registerJingleCalls')
+      if (this.client === client) registerJingleCalls(this, client)
     }
   },
 

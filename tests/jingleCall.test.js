@@ -29,18 +29,24 @@ function offerSdp (video) {
 
 function setup (ownJid, options = {}) {
   const sent = []
+  const invitations = []
   const states = []
   const controller = new JingleCall({
     ownJid,
     send: async (peer, stanza) => sent.push({ peer, stanza }),
+    sendInvitation: async (peer, action, sid, reason) => invitations.push({ peer, action, sid, reason }),
     onChange: state => states.push(state),
     ...options,
   })
-  return { controller, sent, states }
+  return { controller, invitations, sent, states }
 }
 
 function request (action, sid, ...children) {
   return xml('jingle', { xmlns: JINGLE, action, sid }, ...children)
+}
+
+function invitationOffer (sid, video = false) {
+  return request('session-initiate', sid, ...descriptionToJingle(offerSdp(video), 'initiator'))
 }
 
 class FakeTrack {
@@ -363,4 +369,132 @@ test('accepts a same-peer invitation while the local outgoing offer is unsent', 
   await setImmediate()
   assert.ok(track.stopped)
   assert.ok(!alice.sent.some(({ stanza }) => stanza.attrs.action === 'session-initiate'))
+})
+
+test('answers a message invitation only after consent and a matching Jingle offer', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const sid = 'video-invitation'
+  const offer = invitationOffer(sid, true)
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['video', 'audio'])
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['video', 'audio'])
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+  assert.equal(bob.states.at(-1).video, true)
+  assert.deepEqual(bob.invitations.map(({ action }) => action), ['ringing'])
+  await assert.rejects(bob.controller.receive(ALICE, offer), { condition: 'unexpected-request', jingleCondition: 'out-of-order' })
+  assert.deepEqual(captureRequests, [])
+
+  await bob.controller.accept()
+  await bob.controller.accept()
+  assert.equal(bob.states.at(-1).phase, 'connecting')
+  assert.deepEqual(bob.invitations.map(({ action }) => action), ['ringing', 'proceed'])
+  assert.equal(bob.invitations.at(-1).peer, ALICE)
+  assert.equal(bob.invitations.at(-1).sid, sid)
+  await bob.controller.receive(ALICE, invitationOffer('different-session', true))
+  await assert.rejects(bob.controller.receive('alice@example.org/other', offer), { condition: 'item-not-found', jingleCondition: 'unknown-session' })
+  await assert.rejects(bob.controller.receive(ALICE, invitationOffer(sid)), { condition: 'bad-request' })
+  assert.deepEqual(captureRequests, [])
+
+  await bob.controller.receive(ALICE, offer)
+  assert.deepEqual(captureRequests, [])
+  await setTimeout(5)
+  assert.deepEqual(captureRequests, [{ audio: true, video: true }])
+  assert.equal(bob.states.filter(state => state.phase === 'incoming').length, 1)
+  const [pc] = FakePeer.instances
+  pc.finishGathering()
+  await setImmediate()
+  assert.equal(bob.sent.find(({ stanza }) => stanza.attrs.action === 'session-accept').stanza.attrs.sid, sid)
+  pc.connect()
+  assert.equal(bob.states.at(-1).phase, 'active')
+
+  await bob.controller.end()
+  assert.equal(bob.sent.at(-1).stanza.attrs.action, 'session-terminate')
+  assert.deepEqual(bob.invitations.at(-1), { peer: ALICE, action: 'finish', sid, reason: 'success' })
+  assert.ok(pc.tracks.every(track => track.stopped))
+})
+
+test('rejects a busy or declined proposal and ignores its late IQ and duplicate messages', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const other = 'carol@example.org/device'
+  await bob.controller.receiveInvitation(ALICE, 'propose', 'original', ['audio'])
+  await bob.controller.receiveInvitation(other, 'propose', 'extra', ['audio'])
+  await bob.controller.receiveInvitation(other, 'propose', 'extra', ['audio'])
+  assert.equal(bob.states.at(-1).peer, ALICE)
+  assert.deepEqual(bob.invitations.at(-1), { peer: other, action: 'reject', sid: 'extra', reason: 'busy' })
+  await bob.controller.end()
+  assert.deepEqual(bob.invitations.at(-1), { peer: ALICE, action: 'reject', sid: 'original', reason: 'busy' })
+  await bob.controller.receiveInvitation(ALICE, 'propose', 'original', ['audio'])
+  await assert.rejects(bob.controller.receive(ALICE, invitationOffer('original')), { condition: 'item-not-found' })
+  await assert.rejects(bob.controller.receive(other, invitationOffer('extra')), { condition: 'item-not-found' })
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.equal(bob.invitations.length, 3)
+  assert.deepEqual(captureRequests, [])
+})
+
+test('a caller retracts only its own live proposal, including while the local user awaits the offer', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const sid = 'retract'
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['audio'])
+  await bob.controller.accept()
+  await bob.controller.receiveInvitation('alice@example.org/other', 'retract', sid)
+  await bob.controller.receiveInvitation(ALICE, 'retract', 'other')
+  assert.equal(bob.states.at(-1).phase, 'connecting')
+  await bob.controller.receiveInvitation(ALICE, 'retract', sid)
+  assert.equal(bob.states.at(-1).reason, 'cancel')
+  assert.deepEqual(bob.invitations.map(({ action }) => action), ['ringing', 'proceed'])
+  await assert.rejects(bob.controller.receive(ALICE, invitationOffer(sid)), { condition: 'item-not-found' })
+  assert.deepEqual(captureRequests, [])
+})
+
+test('suppresses an authenticated sibling answer for the current invitation', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const otherDevice = 'bob@example.org/Phone'
+  const sid = 'sibling-answer'
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['audio'])
+  await bob.controller.receiveInvitation(BOB, 'proceed', sid, undefined, ALICE)
+  await bob.controller.receiveInvitation(otherDevice, 'proceed', sid, undefined, 'other@example.org/device')
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+  await bob.controller.receiveInvitation(otherDevice, 'proceed', sid, undefined, ALICE)
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.match(bob.states.at(-1).error, /answered on another device/)
+  await assert.rejects(bob.controller.receive(ALICE, invitationOffer(sid)), { condition: 'item-not-found' })
+  assert.deepEqual(captureRequests, [])
+})
+
+test('times out an invitation that never gets a matching IQ and remembers its ID across reset', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const sid = 'timeout'
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['audio'])
+  await bob.controller.accept()
+  t.mock.timers.tick(35000)
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.equal(bob.states.at(-1).reason, 'timeout')
+  assert.deepEqual(bob.invitations.at(-1), { peer: ALICE, action: 'finish', sid, reason: 'expired' })
+
+  bob.controller.reset()
+  await assert.rejects(bob.controller.receive(ALICE, invitationOffer(sid)), { condition: 'item-not-found' })
+  await bob.controller.receive(ALICE, invitationOffer('direct'))
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+  assert.deepEqual(captureRequests, [])
+})
+
+test('disconnecting after the matching IQ prevents deferred media setup', async t => {
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+  const sid = 'disconnect'
+  const offer = invitationOffer(sid)
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['audio'])
+  await bob.controller.accept()
+  await bob.controller.receive(ALICE, offer)
+  bob.controller.reset()
+  await setTimeout(5)
+  await assert.rejects(bob.controller.receive(ALICE, offer), { condition: 'item-not-found' })
+  assert.equal(bob.states.at(-1), null)
+  assert.equal(bob.sent.length, 0)
+  assert.deepEqual(captureRequests, [])
 })

@@ -7,10 +7,12 @@ function getIqId (stanza) {
 
 export function MockServer({ url, jidLocal, jidDomain } ) {
   const mockServer = new Server(url)
+  mockServer.receivedStanzas = []
   mockServer.on('connection', socket => {
     let isAuth = false
     let resource
     socket.on('message', data => {
+      mockServer.receivedStanzas.push(data)
       if (data.startsWith('<open') && !isAuth) {
         isAuth = true
         socket.send(`<open xmlns='urn:ietf:params:xml:ns:xmpp-framing' xml:lang='en' version='1.0' from='${jidDomain}' id='3e25e594-4c00-4000-8de4-0c913bdfb4c5'/>`)

@@ -14,6 +14,7 @@ test('publishes an entity capabilities hash matching the discoverable feature se
   const canonical = [category + '/' + type + '//' + name, ...features.sort(), ''].join('<')
   assert.equal(createHash('sha1').update(canonical).digest('base64'), ver)
   assert.ok(features.includes('urn:xmpp:jingle:apps:rtp:video'))
+  assert.ok(features.includes('urn:xmpp:jingle-message:0'))
   assert.ok(caps.info('unknown').getChild('item-not-found'))
 })
 

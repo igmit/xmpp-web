@@ -142,6 +142,35 @@ describe('XMPP Web for registered users', () => {
     const audioCall = 'button[aria-label="Start audio call"]'
     const videoCall = 'button[aria-label="Start video call"]'
     const callPanel = '[aria-label="Call controls"]'
+    const jmi = 'urn:xmpp:jingle-message:0'
+    const receipts = 'urn:xmpp:receipts'
+    const rtp = 'urn:xmpp:jingle:apps:rtp:1'
+
+    function sendProposal (peer, sid) {
+      mockServer.emit('message', `<message from="${peer}" to="${jidLocal}@${jidDomain}" type="chat" id="proposal-${sid}" xmlns="jabber:client">
+        <propose xmlns="${jmi}" id="${sid}"><description xmlns="${rtp}" media="audio"/></propose>
+        <request xmlns="${receipts}"/><store xmlns="urn:xmpp:hints"/>
+      </message>`)
+    }
+
+    function sendRetract (peer, sid) {
+      mockServer.emit('message', `<message from="${peer}" to="${jidLocal}@${jidDomain}" type="chat" xmlns="jabber:client">
+        <retract xmlns="${jmi}" id="${sid}"/><store xmlns="urn:xmpp:hints"/>
+      </message>`)
+    }
+
+    function expectCallMessage (peer, namespace, action, id) {
+      const parser = new DOMParser()
+      cy.wrap(mockServer.receivedStanzas, { log: false }).should(stanzas => {
+        const sent = stanzas.some(stanza => {
+          if (!stanza.startsWith('<message ')) return false
+          const message = parser.parseFromString(stanza, 'application/xml').documentElement
+          const child = message.getElementsByTagNameNS(namespace, action)[0]
+          return message.getAttribute('to') === peer && child?.getAttribute('id') === id
+        })
+        expect(sent, `${action} ${id} sent to ${peer}`).to.equal(true)
+      })
+    }
 
     it('shows call controls when a contact has a callable resource', () => {
       cy.get(audioCall).should('not.exist')
@@ -196,6 +225,66 @@ describe('XMPP Web for registered users', () => {
         mockServer.emit('message', `<presence from="user2@${jidDomain}/audioClient" type="unavailable" xmlns="jabber:client"/>`)
       })
       cy.get(audioCall).should('not.exist')
+    })
+
+    it('answers a Conversations proposal without prompting again on session-initiate', () => {
+      const peer = `user2@${jidDomain}/Conversations`
+      const sid = 'conversations-accepted'
+      cy.window().then(win => {
+        cy.stub(win.navigator.mediaDevices, 'getUserMedia')
+          .rejects(new win.DOMException('Permission denied', 'NotAllowedError'))
+          .as('getUserMedia')
+        sendProposal(peer, sid)
+      })
+      cy.get(callPanel).should('contain', 'Incoming audio call').and('contain', `user2@${jidDomain}`)
+      expectCallMessage(peer, receipts, 'received', `proposal-${sid}`)
+      cy.get('@getUserMedia').should('not.have.been.called')
+      cy.contains(`${callPanel} button`, 'Accept').click()
+      expectCallMessage(peer, jmi, 'proceed', sid)
+      cy.window().then(win => {
+        const target = `${jidLocal}@${jidDomain}/${win.config.resource || 'Web XMPP'}`
+        const fingerprint = Array(32).fill('AA').join(':')
+        mockServer.emit('message', `<iq from="${peer}" to="${target}" type="set" id="incoming-${sid}" xmlns="jabber:client">
+          <jingle xmlns="urn:xmpp:jingle:1" action="session-initiate" sid="${sid}" initiator="${peer}">
+            <content creator="initiator" name="audio">
+              <description xmlns="${rtp}" media="audio">
+                <payload-type id="0" name="PCMU" clockrate="8000"/><rtcp-mux/>
+              </description>
+              <transport xmlns="urn:xmpp:jingle:transports:ice-udp:1" ufrag="abcd" pwd="abcdefghijklmnopqrstuv">
+                <fingerprint xmlns="urn:xmpp:jingle:apps:dtls:0" hash="sha-256" setup="actpass">${fingerprint}</fingerprint>
+              </transport>
+            </content>
+          </jingle>
+        </iq>`)
+      })
+      cy.get('@getUserMedia').should('have.been.calledOnce')
+      cy.get(callPanel).should('contain', 'Call ended')
+        .find('[role="alert"]').should('contain', 'microphone')
+      cy.contains(`${callPanel} button`, 'Accept').should('not.exist')
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+    })
+
+    it('ignores unsolicited proposals and retracts proposals from the open direct chat', () => {
+      const contact = `user2@${jidDomain}/Conversations`
+      const visitor = `visitor@${jidDomain}`
+      const peer = `${visitor}/Conversations`
+      cy.then(() => {
+        sendProposal(peer, 'unsolicited')
+        sendProposal(contact, 'roster-retract')
+      })
+      cy.get(callPanel).should('contain', `user2@${jidDomain}`)
+      cy.then(() => sendRetract(contact, 'roster-retract'))
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.get(callPanel).should('not.exist')
+
+      cy.window().then(win => { win.location.hash = `#/contacts/${encodeURIComponent(visitor)}` })
+      cy.hash().should('contain', '/contacts/visitor')
+      cy.get('.navbar-brand > span.navbar-item').should('have.text', visitor)
+      cy.then(() => sendProposal(peer, 'open-contact'))
+      cy.get(callPanel).should('contain', 'Incoming audio call').and('contain', visitor)
+      cy.then(() => sendRetract(peer, 'open-contact'))
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.get(callPanel).should('not.exist')
     })
   })
 

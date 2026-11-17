@@ -1,5 +1,5 @@
 import xml from '@xmpp/xml'
-import { JINGLE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK } from './jingleNamespaces.js'
+import { JINGLE, JINGLE_MESSAGE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK } from './jingleNamespaces.js'
 
 export const EXTDISCO = 'urn:xmpp:extdisco:2'
 export const CAPS = 'http://jabber.org/protocol/caps'
@@ -7,7 +7,7 @@ const DISCO = 'http://jabber.org/protocol/disco#info'
 const NODE = 'https://github.com/nioc/xmpp-web'
 const identity = { category: 'client', type: 'web', name: 'XMPP Web' }
 const features = [
-  DISCO, CAPS, JINGLE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK,
+  DISCO, CAPS, JINGLE, JINGLE_MESSAGE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK,
   'urn:xmpp:ping', 'urn:ietf:rfc:3264', 'urn:ietf:rfc:5576', 'urn:ietf:rfc:5888',
 ].sort()
 

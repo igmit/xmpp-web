@@ -91,7 +91,8 @@ class XmppClient {
     this.xmpp.on('stanza', stanza => this.parseStanza(stanza))
   }
 
-  enableCalls (receive) {
+  enableCalls (receive, handleInvitation) {
+    this.handleInvitation = handleInvitation
     this.capabilities = callCapabilities()
     this.xmpp.iqCallee.get(NS.DISCO_INFO, 'query', async ({ element }) =>
       (await this.capabilities).info(element.attrs.node))
@@ -140,6 +141,7 @@ class XmppClient {
 
   parseStanza (stanza) {
     if (stanza.is('message')) {
+      if (this.handleInvitation?.(stanza)) return
       if (stanza.attrs.type === 'chat' || stanza.attrs.type === 'groupchat') {
         // parse stanza message
         if (stanza.attrs.from === this.jid.bare && stanza.attrs.to === this.jid.full) {
@@ -149,7 +151,8 @@ class XmppClient {
             carbon = stanza.getChild('received')
           }
           if (carbon) {
-            const message = carbon.getChild('forwarded').getChild('message')
+            const message = carbon.getChild('forwarded')?.getChild('message')
+            if (!message) return
             if (import.meta.env.DEV && hasDebug) {
               console.debug('1a-carbon', message)
             }

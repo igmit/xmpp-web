@@ -162,9 +162,9 @@ Use `docker pull nioc/xmpp-web:latest` and check if there is some new environmen
 
 ### One-to-one calls
 
-Open a direct chat with a roster contact. The phone and camera buttons appear when an online device advertises the corresponding Jingle RTP capability. Incoming calls can be answered or declined from any registered-user page. The browser requests microphone access for audio calls and microphone and camera access for video calls. Serve the client over HTTPS or localhost so the browser can grant access.
+Open a direct chat with a roster contact. The phone and camera buttons appear when an online device advertises the corresponding Jingle RTP capability. Incoming calls from roster contacts can be answered or declined from any registered-user page. To receive a call from someone outside your roster, open their direct chat first. The browser requests microphone access for audio calls and microphone and camera access for video calls. Serve the client over HTTPS or localhost so the browser can grant access.
 
-The client sends a Jingle invitation directly to the selected full JID. If several devices support the call, it chooses the one with the highest presence priority. Peers must support direct Jingle IQ initiation, RTP, ICE-UDP and DTLS-SRTP. Message-based invitations (XEP-0353) are outside this implementation.
+The client sends a Jingle invitation directly to the selected full JID. If several devices support the call, it chooses the one with the highest presence priority. Outgoing calls use direct Jingle IQ initiation. For incoming calls the client also supports message-based invitations (XEP-0353), as used by Conversations on Android. Both paths negotiate media using Jingle RTP, ICE-UDP and DTLS-SRTP.
 
 For calls across different networks, configure STUN and TURN on your XMPP server using External Service Discovery (XEP-0215). The client requests the advertised services at call time, including temporary TURN credentials. You can also supply servers in `local.js` or with `APP_ICE_SERVERS` in Docker, for example `[{"urls":"stun:stun.example.org:3478"}]`. Values in `local.js` are visible to browsers. Keep the TURN shared secret on the server. With the default empty list and no advertised service, calls depend on a direct network path.
 

@@ -1,4 +1,5 @@
 export const JINGLE = 'urn:xmpp:jingle:1'
+export const JINGLE_MESSAGE = 'urn:xmpp:jingle-message:0'
 export const RTP = 'urn:xmpp:jingle:apps:rtp:1'
 export const ICE = 'urn:xmpp:jingle:transports:ice-udp:1'
 export const DTLS = 'urn:xmpp:jingle:apps:dtls:0'
