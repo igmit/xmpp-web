@@ -11,6 +11,7 @@
       <video v-if="call.video && call.localStream" class="local-video" :srcObject.prop="call.localStream" autoplay playsinline :muted="true" aria-label="Your camera preview" />
     </div>
 
+    <microphone-recovery v-if="call.phase !== 'ended' && call.microphoneStatus" :call="call" />
     <div class="buttons mb-0">
       <button v-if="call.remoteStream && playbackBlocked" type="button" class="button" @click="playRemoteMedia">Play call media</button>
       <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @click="$xmpp.acceptCall()">Accept</button>
@@ -22,13 +23,17 @@
 </template>
 
 <script>
+import { defineAsyncComponent } from 'vue'
 import { mapState } from 'pinia'
 import { useStore } from '@/store'
 import IncomingRingtone from './IncomingRingtone.vue'
 
 export default {
   name: 'CallPanel',
-  components: { IncomingRingtone },
+  components: {
+    IncomingRingtone,
+    MicrophoneRecovery: defineAsyncComponent(() => import('./MicrophoneRecovery.vue')),
+  },
   data () {
     return {
       playbackBlocked: false,

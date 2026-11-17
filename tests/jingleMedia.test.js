@@ -108,6 +108,20 @@ test('converts audio and video SDP to Jingle and preserves negotiated parameters
   }
 })
 
+test('keeps the bare RED payload list intact for Conversations and reads previous clients', () => {
+  const sdp = fixture({ video: false }).replace('111 0 126', '111 0 126 63')
+    .replace('a=rtpmap:126', 'a=rtpmap:63 red/48000/2\r\na=fmtp:63 111/111\r\na=rtpmap:126')
+  const offer = envelope(sdp, 'initiator')
+  const red = offer.getChild('content', JINGLE).getChild('description', RTP).getChildByAttr('id', '63', RTP)
+  const param = red.getChild('parameter', RTP)
+  assert.equal(param.attrs.name, '')
+  assert.equal(param.attrs.value, '111/111')
+  for (const attrs of [{ name: '', value: '111/111' }, { value: '111/111' }, { name: '111/111', value: '' }]) {
+    param.attrs = attrs
+    assert.match(jingleToDescription(offer, 'initiator'), /a=fmtp:63 111\/111\r\n/)
+  }
+})
+
 test('maps audio-only answer directions to the author and checks answer mids', () => {
   const answer = envelope(fixture({ video: false, setup: 'active', direction: 'recvonly' }), 'responder')
   assert.equal(answer.getChild('content', JINGLE).attrs.senders, 'initiator')

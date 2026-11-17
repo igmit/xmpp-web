@@ -406,6 +406,10 @@ export default {
     return this.calls?.accept()
   },
 
+  reconnectMicrophone (deviceId) {
+    return this.calls?.reconnectMicrophone(deviceId)
+  },
+
   endCall () {
     return this.calls?.end()
   },

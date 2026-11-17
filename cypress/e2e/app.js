@@ -197,6 +197,30 @@ describe('XMPP Web for registered users', () => {
       cy.get(audioCall).should('be.enabled')
     })
 
+    it('lets the caller select another microphone when capture ends during setup', () => {
+      let context
+      cy.window().then(win => {
+        context = new win.AudioContext()
+        const capture = cy.stub(win.navigator.mediaDevices, 'getUserMedia').as('capture')
+        const stopped = context.createMediaStreamDestination().stream
+        stopped.getAudioTracks()[0].stop()
+        capture.onFirstCall().resolves(stopped)
+        capture.onSecondCall().resolves(context.createMediaStreamDestination().stream)
+        cy.stub(win.navigator.mediaDevices, 'enumerateDevices').resolves([
+          { kind: 'audioinput', deviceId: 'alternate', label: 'Headset microphone' },
+        ])
+      })
+      cy.get(audioCall).click()
+      cy.get(callPanel).should('contain', 'Your microphone stopped')
+      cy.get(`${callPanel} select`).select('Headset microphone')
+      cy.contains(`${callPanel} button`, 'Reconnect microphone').click()
+      cy.get('@capture').should('have.been.calledWith', { audio: { deviceId: { exact: 'alternate' } } })
+      cy.get(callPanel).should('not.contain', 'Your microphone stopped')
+      cy.contains(`${callPanel} button`, 'Cancel call').click()
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.then(() => context.close())
+    })
+
     it('keeps the call controls available when navigating away from the chat', () => {
       cy.window().then(win => {
         cy.stub(win.navigator.mediaDevices, 'getUserMedia').returns(new Promise(() => {}))

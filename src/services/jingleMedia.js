@@ -58,6 +58,8 @@ function checkGroup(type, mids, availableMids) {
 function writeParameters(config, separator) {
   return config.split(separator).map(parameter => parameter.trim()).filter(Boolean).map(parameter => {
     const equal = parameter.indexOf('=')
+    // Codec formats such as audio/red carry a value with no key (e.g. 111/111).
+    if (equal === -1 && separator === ';') return xml('parameter', { name: '', value: parameter })
     return equal === -1
       ? xml('parameter', { name: parameter, value: '' })
       : xml('parameter', { name: parameter.slice(0, equal).trim(), value: parameter.slice(equal + 1).trim() })
@@ -66,8 +68,9 @@ function writeParameters(config, separator) {
 
 function readParameters(element, namespace, separator) {
   return element.getChildren('parameter', namespace).map(({ attrs }) => {
-    const name = text(attrs.name, 'parameter name')
     const value = text(attrs.value ?? '', 'parameter value')
+    if (namespace === NS.RTP && !attrs.name && value) return value
+    const name = text(attrs.name, 'parameter name')
     return value ? `${name}=${value}` : name
   }).join(separator)
 }

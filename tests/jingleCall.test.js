@@ -53,14 +53,20 @@ class FakeTrack {
   constructor (kind) {
     this.kind = kind
     this.stopped = false
+    this.readyState = 'live'
   }
 
-  stop () { this.stopped = true }
+  stop () {
+    this.stopped = true
+    this.readyState = 'ended'
+  }
 }
 
 class FakeStream {
   constructor (tracks = []) { this.tracks = tracks }
   getTracks () { return this.tracks }
+  getAudioTracks () { return this.tracks.filter(track => track.kind === 'audio') }
+  removeTrack (track) { this.tracks = this.tracks.filter(item => item !== track) }
   addTrack (track) { this.tracks.push(track) }
 }
 
@@ -75,7 +81,10 @@ class FakePeer extends EventTarget {
     FakePeer.instances.push(this)
   }
 
-  addTrack (track) { this.tracks.push(track) }
+  addTrack (track) {
+    this.tracks.push(track)
+    return { track, async replaceTrack (replacement) { this.track = replacement } }
+  }
 
   async createOffer () {
     return { type: 'offer', sdp: offerSdp(this.tracks.some(track => track.kind === 'video')) }
@@ -263,6 +272,42 @@ test('cleans up a stale permission request after canceling the outgoing call', a
   await setImmediate()
   assert.ok(track.stopped)
   assert.equal(FakePeer.instances.length, 0)
+})
+
+test('can retry a microphone that is already ended at setup and releases a late grant on hangup', async t => {
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  const ended = new FakeTrack('audio')
+  ended.stop()
+  mockCapture(async () => new FakeStream([ended]))
+  const starting = alice.controller.start(BOB)
+  await setImmediate()
+  const pc = FakePeer.instances[0]
+  pc.finishGathering()
+  await starting
+  assert.equal(alice.states.at(-1).microphoneStatus, 'unavailable')
+
+  mockCapture(async () => { throw Object.assign(new Error(), { name: 'NotAllowedError' }) })
+  await alice.controller.reconnectMicrophone()
+  assert.equal(alice.states.at(-1).microphoneStatus, 'unavailable')
+  assert.match(alice.states.at(-1).microphoneError, /Allow microphone access/)
+
+  let grant
+  let requests = 0
+  mockCapture(() => {
+    requests++
+    return new Promise(resolve => { grant = resolve })
+  })
+  const recovery = alice.controller.reconnectMicrophone()
+  await alice.controller.reconnectMicrophone()
+  assert.equal(requests, 1)
+  assert.equal(alice.states.at(-1).microphoneStatus, 'reconnecting')
+  await alice.controller.end()
+  const late = new FakeTrack('audio')
+  grant(new FakeStream([late]))
+  await recovery
+  assert.ok(late.stopped)
+  assert.equal(alice.states.at(-1).phase, 'ended')
 })
 
 test('cancels an async ICE lookup and closes captured media on disconnect', async t => {

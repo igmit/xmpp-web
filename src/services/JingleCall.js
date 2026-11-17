@@ -113,6 +113,7 @@ export class JingleCall {
     this.onChange = onChange
     this.iceServers = iceServers
     this.session = null
+    this.preferredMicrophone = null
     this.generation = 0
     this.recentInvitations = new Set()
   }
@@ -159,7 +160,8 @@ export class JingleCall {
 
   publish (session, ended) {
     const { phase, peer, video, localStream, remoteStream } = session
-    this.onChange({ phase, peer, video, localStream, remoteStream, ...ended })
+    const { microphoneStatus, microphoneError } = session
+    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneStatus, microphoneError, ...ended })
   }
 
   async sendAction (session, action, children) {
@@ -206,6 +208,7 @@ export class JingleCall {
     if (session.invitation) this.rememberInvitation(session.sid)
     clearTimeout(session.phaseTimer)
     clearTimeout(session.recoveryTimer)
+    clearInterval(session.microphoneTimer)
     session.abort.abort()
     if (session.pc) {
       session.pc.ontrack = null
@@ -261,7 +264,8 @@ export class JingleCall {
     const canceled = new Promise(resolve => {
       signal.addEventListener('abort', () => resolve(null), { once: true })
     })
-    const capture = media.getUserMedia({ audio: true, video: session.video }).then(stream => {
+    const audio = this.preferredMicrophone ? { deviceId: { ideal: this.preferredMicrophone } } : true
+    const capture = media.getUserMedia({ audio, video: session.video }).then(stream => {
       if (this.session === session) session.localStream = stream
       else stopTracks(stream)
     })
@@ -283,9 +287,55 @@ export class JingleCall {
       this.publish(session)
     }
     pc.onconnectionstatechange = () => this.connectionChanged(session)
-    stream.getTracks().forEach(track => pc.addTrack(track, stream))
+    for (const track of stream.getTracks()) {
+      const sender = pc.addTrack(track, stream)
+      if (track.kind === 'audio') session.microphoneSender = sender
+    }
+    // MediaStreamTrack.stop() changes readyState without firing an ended event.
+    const checkMicrophone = () => {
+      if (session.microphoneSender?.track?.readyState === 'ended' && !session.microphoneStatus) {
+        session.microphoneStatus = 'unavailable'
+        this.publish(session)
+      }
+    }
+    checkMicrophone()
+    session.microphoneTimer = setInterval(checkMicrophone, 1000)
     this.publish(session)
     return this.session === session ? pc : null
+  }
+
+  async reconnectMicrophone (deviceId) {
+    const session = this.session
+    if (session?.microphoneStatus !== 'unavailable') return
+    session.microphoneStatus = 'reconnecting'
+    session.microphoneError = null
+    this.publish(session)
+
+    let replacement
+    try {
+      const audio = deviceId ? { deviceId: { exact: deviceId } } : true
+      replacement = await navigator.mediaDevices.getUserMedia({ audio })
+      if (this.session !== session) return
+      const [track] = replacement.getAudioTracks()
+      if (track?.readyState !== 'live') throw setupError('The microphone stopped during capture.')
+      await session.microphoneSender.replaceTrack(track)
+      if (this.session !== session) return
+      for (const old of session.localStream.getAudioTracks()) {
+        session.localStream.removeTrack(old)
+        old.stop()
+      }
+      session.localStream.addTrack(track)
+      replacement.removeTrack(track)
+      this.preferredMicrophone = deviceId || null
+      session.microphoneStatus = null
+    } catch (error) {
+      if (this.session !== session) return
+      session.microphoneStatus = 'unavailable'
+      session.microphoneError = localError(error, false)
+    } finally {
+      stopTracks(replacement)
+      if (this.session === session) this.publish(session)
+    }
   }
 
   connectionChanged (session) {
