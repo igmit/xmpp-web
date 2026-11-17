@@ -162,7 +162,7 @@ Use `docker pull nioc/xmpp-web:latest` and check if there is some new environmen
 
 ### One-to-one calls
 
-Open a direct chat with a roster contact. The phone and camera buttons appear when an online device advertises the corresponding Jingle RTP capability. Incoming calls from roster contacts can be answered or declined from any registered-user page. To receive a call from someone outside your roster, open their direct chat first. The browser requests microphone access for audio calls and microphone and camera access for video calls. Serve the client over HTTPS or localhost so the browser can grant access.
+Open a direct chat with a roster contact. The phone and camera buttons appear when an online device advertises the corresponding Jingle RTP capability. Incoming calls from roster contacts can be answered or declined from any registered-user page. To receive a call from someone outside your roster, open their direct chat first. Incoming audio and video calls play a repeating ringtone by default. Use **Incoming call ringtone** in the presence menu to mute or enable it for this browser. Some browsers require a click or tap on the page before they allow sound. The browser requests microphone access for audio calls and microphone and camera access for video calls. Serve the client over HTTPS or localhost so the browser can grant access.
 
 The client sends a Jingle invitation directly to the selected full JID. If several devices support the call, it chooses the one with the highest presence priority. Outgoing calls use direct Jingle IQ initiation. For incoming calls the client also supports message-based invitations (XEP-0353), as used by Conversations on Android. Both paths negotiate media using Jingle RTP, ICE-UDP and DTLS-SRTP.
 

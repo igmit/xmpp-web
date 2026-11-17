@@ -11,6 +11,9 @@
         <div :class="[isNavbarItem ? 'navbar-item' : 'dropdown-item']">
           <o-switch v-model="isAutoPresence" title="You will be seen away when the browser is not active" class="has-no-wrap" @change="setAutoPresence"><span class="icon mr-1"><i class="fa-regular fa-moon fa-fw" aria-hidden="true" /></span>Set away when inactive</o-switch>
         </div>
+        <div v-if="!$xmpp.isAnonymous" :class="[isNavbarItem ? 'navbar-item' : 'dropdown-item']">
+          <o-switch v-model="callRingtoneEnabled" class="has-no-wrap"><span class="icon mr-1"><i class="fa-solid fa-volume-high fa-fw" aria-hidden="true" /></span>Incoming call ringtone</o-switch>
+        </div>
         <notifications-switch :class="[isNavbarItem ? 'navbar-item' : 'dropdown-item']" />
         <div :class="[isNavbarItem ? 'navbar-item' : 'dropdown-item']">
           <o-switch v-model="isSendingTypingChatStatesSwitch" title="Notify your partner(s) that you are typing or paused" class="has-no-wrap"><span class="icon mr-1"><i class="fa-regular fa-pen-to-square fa-fw" aria-hidden="true" /></span>Send typing states</o-switch>
@@ -59,6 +62,7 @@ export default {
       'presence',
     ]),
     ...mapWritableState(useStore, [
+      'callRingtoneEnabled',
       'isSendingTypingChatStates',
       'isSendingInactiveChatStates',
     ]),

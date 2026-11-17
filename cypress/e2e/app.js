@@ -237,9 +237,11 @@ describe('XMPP Web for registered users', () => {
         sendProposal(peer, sid)
       })
       cy.get(callPanel).should('contain', 'Incoming audio call').and('contain', `user2@${jidDomain}`)
+      cy.get(`${callPanel} audio[loop]`).should('have.prop', 'paused', false)
       expectCallMessage(peer, receipts, 'received', `proposal-${sid}`)
       cy.get('@getUserMedia').should('not.have.been.called')
       cy.contains(`${callPanel} button`, 'Accept').click()
+      cy.get(`${callPanel} audio[loop]`).should('not.exist')
       expectCallMessage(peer, jmi, 'proceed', sid)
       cy.window().then(win => {
         const target = `${jidLocal}@${jidDomain}/${win.config.resource || 'Web XMPP'}`
@@ -261,6 +263,54 @@ describe('XMPP Web for registered users', () => {
       cy.get(callPanel).should('contain', 'Call ended')
         .find('[role="alert"]').should('contain', 'microphone')
       cy.contains(`${callPanel} button`, 'Accept').should('not.exist')
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+    })
+
+    it('keeps the call visible when autoplay is blocked and retries on interaction', () => {
+      const peer = `user2@${jidDomain}/Conversations`
+      cy.window().then(win => {
+        const play = cy.stub(win.HTMLMediaElement.prototype, 'play').resolves().as('playTone')
+        play.onFirstCall().rejects(new win.DOMException('User interaction required', 'NotAllowedError'))
+        sendProposal(peer, 'blocked-tone')
+      })
+      cy.contains(`${callPanel} button`, 'Accept').should('be.visible')
+      cy.get('@playTone').should('have.been.calledOnce')
+      cy.get('body').trigger('keydown', { key: 'Shift' })
+      cy.get('@playTone').should('have.been.calledTwice')
+      cy.contains(`${callPanel} button`, 'Decline').click()
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.get('body').trigger('keydown', { key: 'Shift' })
+      cy.get('@playTone').should('have.been.calledTwice')
+    })
+
+    it('saves the ringtone preference and stops playback when muted or the call ends', () => {
+      const peer = `user2@${jidDomain}/Conversations`
+      const toggle = () => cy.contains('#dropdown-menu label', 'Incoming call ringtone').find('input')
+      toggle().should('be.checked').uncheck({ force: true })
+      cy.visit('/', { onBeforeLoad })
+      toggle().should('not.be.checked')
+      cy.then(() => sendProposal(peer, 'muted-call'))
+      cy.get(callPanel).should('contain', 'Incoming audio call')
+      cy.get(`${callPanel} audio[loop]`).should('not.exist')
+
+      toggle().check({ force: true })
+      cy.get(`${callPanel} audio[loop]`).should(tone => {
+        expect(tone[0].currentTime).to.be.greaterThan(0)
+      }).then(tone => {
+        toggle().uncheck({ force: true })
+        cy.get(`${callPanel} audio[loop]`).should('not.exist').then(() => {
+          expect(tone[0].paused).to.equal(true)
+        })
+      })
+      toggle().check({ force: true })
+      cy.get(`${callPanel} audio[loop]`).should(tone => {
+        expect(tone[0].paused).to.equal(false)
+      }).then(tone => {
+        sendRetract(peer, 'muted-call')
+        cy.get(`${callPanel} audio[loop]`).should('not.exist').then(() => {
+          expect(tone[0].paused).to.equal(true)
+        })
+      })
       cy.contains(`${callPanel} button`, 'Dismiss').click()
     })
 

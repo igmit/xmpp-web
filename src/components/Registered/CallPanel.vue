@@ -1,5 +1,6 @@
 <template>
   <section v-if="call" class="call-panel box has-background-shade-2 p-4" aria-label="Call controls">
+    <incoming-ringtone v-if="call.phase === 'incoming' && callRingtoneEnabled" />
     <p class="has-text-weight-semibold">{{ status }}</p>
     <p class="call-peer mb-3" :title="call.peer">{{ peer }}</p>
     <p v-if="call.error" class="has-text-danger-light mb-3" role="alert">{{ call.error }}</p>
@@ -23,16 +24,18 @@
 <script>
 import { mapState } from 'pinia'
 import { useStore } from '@/store'
+import IncomingRingtone from './IncomingRingtone.vue'
 
 export default {
   name: 'CallPanel',
+  components: { IncomingRingtone },
   data () {
     return {
       playbackBlocked: false,
     }
   },
   computed: {
-    ...mapState(useStore, ['call']),
+    ...mapState(useStore, ['call', 'callRingtoneEnabled']),
     peer () {
       return this.call.peer.split('/')[0]
     },

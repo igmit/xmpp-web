@@ -29,7 +29,7 @@
 
 <script>
 import { mapState } from 'pinia'
-import { useStore } from '@/store'
+import { callRingtoneKey, useStore } from '@/store'
 import Avatar from '../Shared/Avatar.vue'
 import PresenceController from '../Shared/PresenceController.vue'
 import { bugs } from '../../../package.json'
@@ -62,7 +62,9 @@ export default {
     async logout () {
       await this.$xmpp.disconnect()
       this.$store.clear()
-      localStorage.clear()
+      for (const key of Object.keys(localStorage)) {
+        if (key !== callRingtoneKey) localStorage.removeItem(key)
+      }
       sessionStorage.clear()
       this.$router.replace('/login')
     },

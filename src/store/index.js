@@ -1,5 +1,7 @@
 import { defineStore } from 'pinia'
-import { useWebNotification, useDocumentVisibility } from '@vueuse/core'
+import { useWebNotification, useDocumentVisibility, useLocalStorage } from '@vueuse/core'
+
+export const callRingtoneKey = 'callRingtoneEnabled'
 
 let showNotification = null
 
@@ -29,6 +31,7 @@ export const useStore = defineStore('main', {
   state: () => {
     return {
       hasNetwork: null,
+      callRingtoneEnabled: useLocalStorage(callRingtoneKey, true, { writeDefaults: false }),
       ...getDefaultState(),
     }
   },
