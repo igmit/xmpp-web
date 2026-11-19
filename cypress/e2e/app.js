@@ -338,6 +338,23 @@ describe('XMPP Web for registered users', () => {
       cy.contains(`${callPanel} button`, 'Dismiss').click()
     })
 
+    for (const action of ['Accept', 'Decline']) {
+      it(`does not retry a blocked ringtone when pressing ${action}`, () => {
+        const peer = `user2@${jidDomain}/Conversations`
+        cy.window().then(win => {
+          cy.stub(win.HTMLMediaElement.prototype, 'play')
+            .rejects(new win.DOMException('User interaction required', 'NotAllowedError')).as('playTone')
+          sendProposal(peer, `blocked-tone-${action.toLowerCase()}`)
+        })
+        cy.get('@playTone').should('have.been.calledOnce')
+        cy.contains(`${callPanel} button`, action).trigger('keydown', { key: 'Enter' }).click()
+        cy.get(`${callPanel} audio[loop]`).should('not.exist')
+        cy.get('@playTone').should('have.been.calledOnce')
+        if (action === 'Accept') cy.contains(`${callPanel} button`, 'Hang up').click()
+        cy.contains(`${callPanel} button`, 'Dismiss').click()
+      })
+    }
+
     it('ignores unsolicited proposals and retracts proposals from the open direct chat', () => {
       const contact = `user2@${jidDomain}/Conversations`
       const visitor = `visitor@${jidDomain}`

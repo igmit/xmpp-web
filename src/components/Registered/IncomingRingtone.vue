@@ -7,21 +7,30 @@
 <script>
 export default {
   name: 'IncomingRingtone',
+  data () {
+    return { stopped: false }
+  },
   mounted () {
     this.play()
   },
   beforeUnmount () {
-    this.removeListeners()
-    this.$refs.tone.pause()
+    this.stop()
   },
   methods: {
+    stop () {
+      if (this.stopped) return
+      this.stopped = true
+      this.removeListeners()
+      this.$refs.tone.pause()
+    },
     async play () {
+      if (this.stopped) return
       const tone = this.$refs.tone
       try {
         await tone.play()
         this.removeListeners()
       } catch (error) {
-        if (error.name === 'NotAllowedError' && this.$refs.tone === tone) {
+        if (error.name === 'NotAllowedError' && !this.stopped) {
           // Retry within the next user gesture if the browser blocked autoplay.
           document.addEventListener('click', this.play)
           document.addEventListener('keydown', this.play)

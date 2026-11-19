@@ -1,6 +1,6 @@
 <template>
   <section v-if="call" class="call-panel box has-background-shade-2 p-4" aria-label="Call controls">
-    <incoming-ringtone v-if="call.phase === 'incoming' && callRingtoneEnabled" />
+    <incoming-ringtone v-if="call.phase === 'incoming' && callRingtoneEnabled" ref="ringtone" />
     <p class="has-text-weight-semibold">{{ status }}</p>
     <p class="call-peer mb-3" :title="call.peer">{{ peer }}</p>
     <p v-if="call.error" class="has-text-danger-light mb-3" role="alert">{{ call.error }}</p>
@@ -15,9 +15,9 @@
     <microphone-recovery v-else-if="call.phase !== 'ended' && call.microphoneStatus" :call="call" />
     <div class="buttons mb-0">
       <button v-if="call.remoteStream && playbackBlocked" type="button" class="button" @click="playRemoteMedia">Play call media</button>
-      <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @click="$xmpp.acceptCall()">Accept</button>
+      <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @keydown.stop @click="acceptCall">Accept</button>
       <button v-if="call.phase === 'ended'" type="button" class="button" @click="$xmpp.dismissCall()">Dismiss</button>
-      <button v-else type="button" class="button is-danger" @click="$xmpp.endCall()">{{ endLabel }}</button>
+      <button v-else type="button" class="button is-danger" @keydown.stop @click="endCall">{{ endLabel }}</button>
     </div>
   </section>
   <p class="is-sr-only" role="status">{{ call ? `${status}. ${peer}` : '' }}</p>
@@ -74,6 +74,14 @@ export default {
     },
   },
   methods: {
+    acceptCall () {
+      this.$refs.ringtone?.stop()
+      return this.$xmpp.acceptCall()
+    },
+    endCall () {
+      this.$refs.ringtone?.stop()
+      return this.$xmpp.endCall()
+    },
     async playRemoteMedia () {
       const media = this.$refs.remoteMedia
       const stream = this.remoteStream
