@@ -51,11 +51,18 @@ function invitationOffer (sid, video = false) {
   return request('session-initiate', sid, ...descriptionToJingle(offerSdp(video), 'initiator'))
 }
 
-class FakeTrack {
+class FakeTrack extends EventTarget {
   constructor (kind) {
+    super()
     this.kind = kind
     this.stopped = false
     this.readyState = 'live'
+    this.muted = false
+  }
+
+  setMuted (muted) {
+    this.muted = muted
+    this.dispatchEvent(new Event(muted ? 'mute' : 'unmute'))
   }
 
   stop () {
@@ -401,6 +408,36 @@ test('can retry a microphone that is already ended at setup and releases a late 
   await recovery
   assert.ok(late.stopped)
   assert.equal(alice.states.at(-1).phase, 'ended')
+})
+
+test('distinguishes microphone mute, unmute and loss and observes the replacement track', async t => {
+  const { controller, sent, states } = setup(ALICE)
+  t.after(() => controller.reset())
+  const pc = await startActiveCall(controller, sent)
+  const [track] = pc.tracks
+  track.setMuted(true)
+  assert.equal(states.at(-1).microphoneStatus, 'muted')
+  track.setMuted(false)
+  assert.equal(states.at(-1).microphoneStatus, null)
+  track.setMuted(true)
+  track.stop()
+  track.dispatchEvent(new Event('ended'))
+  assert.equal(states.at(-1).microphoneStatus, 'unavailable')
+
+  await controller.reconnectMicrophone()
+  const [replacement] = states.at(-1).localStream.getAudioTracks()
+  assert.notEqual(replacement, track)
+  const state = states.at(-1)
+  track.setMuted(false)
+  assert.equal(states.at(-1), state)
+  replacement.setMuted(true)
+  assert.equal(states.at(-1).microphoneStatus, 'muted')
+  replacement.setMuted(false)
+  assert.equal(states.at(-1).microphoneStatus, null)
+  await controller.end()
+  const ended = states.at(-1)
+  replacement.setMuted(true)
+  assert.equal(states.at(-1), ended)
 })
 
 test('cancels an async ICE lookup and closes captured media on disconnect', async t => {

@@ -39,6 +39,11 @@ function stopTracks (stream) {
   stream?.getTracks().forEach(track => track.stop())
 }
 
+function microphoneStatus (track) {
+  if (track.readyState === 'ended') return 'unavailable'
+  return track.muted ? 'muted' : null
+}
+
 function fullJid (address) {
   if (typeof address !== 'string') return null
   try {
@@ -212,7 +217,7 @@ export class JingleCall {
     clearTimeout(session.recoveryTimer)
     clearTimeout(session.signalingTimer)
     clearTimeout(session.peerPresenceTimer)
-    clearInterval(session.microphoneTimer)
+    session.unwatchMicrophone?.()
     session.abort.abort()
     if (session.pc) {
       session.pc.ontrack = null
@@ -328,17 +333,31 @@ export class JingleCall {
       const sender = pc.addTrack(track, stream)
       if (track.kind === 'audio') session.microphoneSender = sender
     }
-    // MediaStreamTrack.stop() changes readyState without firing an ended event.
-    const checkMicrophone = () => {
-      if (session.microphoneSender?.track?.readyState === 'ended' && !session.microphoneStatus) {
-        session.microphoneStatus = 'unavailable'
-        this.publish(session)
-      }
-    }
-    checkMicrophone()
-    session.microphoneTimer = setInterval(checkMicrophone, 1000)
+    this.watchMicrophone(session)
     this.publish(session)
     return this.session === session ? pc : null
+  }
+
+  watchMicrophone (session) {
+    const track = session.microphoneSender?.track
+    if (!track) return
+    session.microphoneStatus = microphoneStatus(track)
+    const update = () => {
+      if (this.session !== session || session.microphoneSender.track !== track || session.microphoneStatus === 'reconnecting') return
+      const status = microphoneStatus(track)
+      if (status === session.microphoneStatus) return
+      session.microphoneStatus = status
+      session.microphoneError = null
+      this.publish(session)
+    }
+    const events = ['mute', 'unmute', 'ended']
+    for (const event of events) track.addEventListener(event, update)
+    // MediaStreamTrack.stop() changes readyState without firing an ended event.
+    const timer = setInterval(update, 1000)
+    session.unwatchMicrophone = () => {
+      clearInterval(timer)
+      for (const event of events) track.removeEventListener(event, update)
+    }
   }
 
   async reconnectMicrophone (deviceId) {
@@ -357,6 +376,7 @@ export class JingleCall {
       if (track?.readyState !== 'live') throw setupError('The microphone stopped during capture.')
       await session.microphoneSender.replaceTrack(track)
       if (this.session !== session) return
+      session.unwatchMicrophone()
       for (const old of session.localStream.getAudioTracks()) {
         session.localStream.removeTrack(old)
         old.stop()
@@ -364,7 +384,7 @@ export class JingleCall {
       session.localStream.addTrack(track)
       replacement.removeTrack(track)
       this.preferredMicrophone = deviceId || null
-      session.microphoneStatus = null
+      this.watchMicrophone(session)
     } catch (error) {
       if (this.session !== session) return
       session.microphoneStatus = 'unavailable'
