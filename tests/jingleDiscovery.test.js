@@ -5,7 +5,8 @@ import { xml } from '@xmpp/client'
 import { callCapabilities, EXTDISCO, iceServersFromServices } from '../src/services/jingleDiscovery.js'
 
 test('publishes an entity capabilities hash matching the discoverable feature set', async () => {
-  const caps = await callCapabilities()
+  const chatFeatures = ['http://jabber.org/protocol/chatstates', 'urn:xmpp:reactions:0']
+  const caps = await callCapabilities(chatFeatures)
   const { node, ver } = caps.presence().attrs
   const query = caps.info(node + '#' + ver)
   assert.equal(query.attrs.node, node + '#' + ver)
@@ -15,6 +16,7 @@ test('publishes an entity capabilities hash matching the discoverable feature se
   assert.equal(createHash('sha1').update(canonical).digest('base64'), ver)
   assert.ok(features.includes('urn:xmpp:jingle:apps:rtp:video'))
   assert.ok(features.includes('urn:xmpp:jingle-message:0'))
+  for (const feature of chatFeatures) assert.ok(features.includes(feature))
   assert.ok(caps.info('unknown').getChild('item-not-found'))
 })
 

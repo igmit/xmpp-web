@@ -9,11 +9,12 @@ const identity = { category: 'client', type: 'web', name: 'XMPP Web' }
 const features = [
   DISCO, CAPS, JINGLE, JINGLE_MESSAGE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK,
   'urn:xmpp:ping', 'urn:ietf:rfc:3264', 'urn:ietf:rfc:5576', 'urn:ietf:rfc:5888',
-].sort()
+]
 
 // Advertise the same feature set in presence and in the node-specific disco reply (XEP-0115).
-export async function callCapabilities () {
-  const canonical = identity.category + '/' + identity.type + '//' + identity.name + '<' + features.join('<') + '<'
+export async function callCapabilities (chatFeatures) {
+  const advertisedFeatures = [...features, ...chatFeatures].sort()
+  const canonical = identity.category + '/' + identity.type + '//' + identity.name + '<' + advertisedFeatures.join('<') + '<'
   const hash = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(canonical))
   const ver = btoa(String.fromCharCode(...new Uint8Array(hash)))
   return {
@@ -21,7 +22,7 @@ export async function callCapabilities () {
     info (node) {
       if (node && node !== NODE + '#' + ver) return stanzaError('item-not-found')
       return xml('query', { xmlns: DISCO, node }, xml('identity', identity),
-        ...features.map(feature => xml('feature', { var: feature })))
+        ...advertisedFeatures.map(feature => xml('feature', { var: feature })))
     },
   }
 }

@@ -93,7 +93,8 @@ class XmppClient {
 
   enableCalls (receive, handleInvitation) {
     this.handleInvitation = handleInvitation
-    this.capabilities = callCapabilities()
+    const chatFeatures = hasChatState ? [NS.REACTIONS, NS.CHAT_STATE] : [NS.REACTIONS]
+    this.capabilities = callCapabilities(chatFeatures)
     this.xmpp.iqCallee.get(NS.DISCO_INFO, 'query', async ({ element }) =>
       (await this.capabilities).info(element.attrs.node))
     this.xmpp.iqCallee.set(JINGLE, 'jingle', async ({ stanza, element }) => {
