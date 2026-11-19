@@ -1,10 +1,12 @@
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 import { afterEach, beforeEach, test } from 'node:test'
 import { setImmediate, setTimeout } from 'node:timers/promises'
 import { xml } from '@xmpp/client'
 import JingleCall from '../src/services/JingleCall.js'
 import { JINGLE } from '../src/services/jingleNamespaces.js'
 import { descriptionToJingle } from '../src/services/jingleMedia.js'
+import { registerJingleCalls } from '../src/services/registerJingleCalls.js'
 
 const ALICE = 'alice@example.org/Browser'
 const BOB = 'bob@example.org/Browser'
@@ -141,6 +143,97 @@ afterEach(() => {
     if (descriptors[index]) Object.defineProperty(globalThis, key, descriptors[index])
     else delete globalThis[key]
   })
+})
+
+async function startActiveCall (controller, sent) {
+  const starting = controller.start(BOB)
+  await setImmediate()
+  const pc = FakePeer.instances.at(-1)
+  pc.finishGathering()
+  await starting
+  const [{ stanza: offer }] = sent
+  const answer = offerSdp(false).replaceAll('a=setup:actpass', 'a=setup:active')
+  await controller.receive(BOB, request('session-accept', offer.attrs.sid, ...descriptionToJingle(answer, 'responder')))
+  pc.connect()
+  return pc
+}
+
+function registerTestClient (t) {
+  const client = new EventEmitter()
+  const sent = []
+  client.xmpp = { jid: ALICE }
+  client.parseJid = full => ({ full })
+  client.getIceServers = async () => []
+  client.sendJingle = async (peer, stanza) => sent.push({ peer, stanza })
+  client.enableCalls = () => {}
+  const store = {}
+  const socket = { client, context: { $store: store } }
+  registerJingleCalls(socket, client)
+  client.emit('online', ALICE)
+  t.after(() => socket.calls.reset())
+  return { client, sent, socket, store }
+}
+
+test('keeps active media on XMPP resume or a fresh bind with the same full JID', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { client, sent, socket, store } = registerTestClient(t)
+  const controller = socket.calls
+  const pc = await startActiveCall(controller, sent)
+
+  client.emit('status', 'disconnect')
+  t.mock.timers.tick(20000)
+  client.emit('resumed')
+  t.mock.timers.tick(15000)
+  client.emit('status', 'close')
+  t.mock.timers.tick(20000)
+  client.emit('online', ALICE)
+  t.mock.timers.tick(15000)
+  assert.equal(store.call.phase, 'active')
+  assert.equal(socket.calls, controller)
+  assert.equal(pc.connectionState, 'connected')
+  assert.equal(pc.tracks[0].stopped, false)
+
+  client.emit('status', 'disconnect')
+  client.emit('online', 'alice@example.org/New')
+  assert.notEqual(socket.calls, controller)
+  assert.equal(pc.connectionState, 'closed')
+  assert.equal(store.call, null)
+})
+
+test('ends active media when loss of XMPP signaling exceeds the grace period', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { client, sent, socket, store } = registerTestClient(t)
+  const pc = await startActiveCall(socket.calls, sent)
+  client.emit('status', 'close')
+  t.mock.timers.tick(29000)
+  assert.equal(pc.connectionState, 'connected')
+  client.emit('status', 'disconnect')
+  t.mock.timers.tick(1000)
+  assert.equal(pc.connectionState, 'closed')
+  assert.ok(pc.tracks[0].stopped)
+  assert.equal(store.call.phase, 'ended')
+  assert.match(store.call.error, /XMPP connection was lost/)
+  client.emit('resumed')
+  assert.equal(store.call.phase, 'ended')
+})
+
+test('gives the call peer time to return on the same resource', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { controller, sent, states } = setup(ALICE)
+  t.after(() => controller.reset())
+  const pc = await startActiveCall(controller, sent)
+  controller.peerAvailabilityChanged(BOB, false)
+  t.mock.timers.tick(20000)
+  controller.peerAvailabilityChanged(BOB, true)
+  t.mock.timers.tick(15000)
+  assert.equal(pc.connectionState, 'connected')
+
+  controller.peerAvailabilityChanged(BOB, false)
+  controller.peerAvailabilityChanged('bob@example.org/Other', true)
+  t.mock.timers.tick(30000)
+  assert.equal(pc.connectionState, 'closed')
+  assert.equal(states.at(-1).reason, 'gone')
+  assert.equal(sent.at(-1).stanza.attrs.action, 'session-terminate')
 })
 
 for (const video of [false, true]) {

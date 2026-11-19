@@ -20,6 +20,7 @@ export function registerJingleCalls (socket, client) {
       })
     }
     socket.calls = controller
+    controller.signalingRestored()
   }
 
   function allowsCaller (from, sid) {
@@ -36,6 +37,11 @@ export function registerJingleCalls (socket, client) {
     bind(jid)
   })
   client.on('resumed', () => bind(client.xmpp.jid))
+  client.on('status', status => {
+    if (client === socket.client && ['close', 'disconnect', 'offline'].includes(status)) {
+      controller?.signalingLost()
+    }
+  })
   client.enableCalls((peer, jingle) => {
     if (socket.client !== client || !socket.calls) {
       throw Object.assign(new Error('Offline'), { condition: 'service-unavailable' })

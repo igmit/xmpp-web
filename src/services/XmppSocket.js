@@ -163,7 +163,6 @@ export default {
     this.client.on('status', (status) => {
       if (client !== this.client) return
       if (status === 'close' || status === 'disconnect' || status === 'offline') {
-        this.clearCalls()
         if (this.context.$store.isOnline) {
           console.warn('XMPP connection is closed')
           this.context.$store.setOnline(false)
@@ -370,12 +369,12 @@ export default {
 
   async updateCallResource ({ from, type, capsVersion, priority }) {
     if (!this.calls || !from.resource) return
+    if (!type || type === 'unavailable') this.calls.peerAvailabilityChanged(from.full, !type)
     const store = this.context.$store
     if (!store.contacts.some(contact => contact.jid === from.bare)) return
     const existing = store.callResources.find(resource => resource.full === from.full)
     if (type === 'unavailable') {
       store.callResources = store.callResources.filter(resource => resource !== existing)
-      if (store.call?.peer === from.full && store.call.phase !== 'ended') this.calls.end()
       return
     }
     if (type) return

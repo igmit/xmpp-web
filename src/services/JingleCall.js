@@ -8,6 +8,8 @@ const RING_TIMEOUT = 60000
 const CONNECTION_TIMEOUT = 35000
 const ICE_GATHERING_TIMEOUT = 15000
 const RECOVERY_TIMEOUT = 10000
+const SIGNALING_TIMEOUT = 30000
+const SIGNALING_ERROR = 'The call ended because the XMPP connection was lost.'
 const RECENT_INVITATION_LIMIT = 128
 const CONNECTION_ERROR = 'Could not connect the call. The networks may require a TURN relay.'
 const REMOTE_END_MESSAGES = {
@@ -208,6 +210,8 @@ export class JingleCall {
     if (session.invitation) this.rememberInvitation(session.sid)
     clearTimeout(session.phaseTimer)
     clearTimeout(session.recoveryTimer)
+    clearTimeout(session.signalingTimer)
+    clearTimeout(session.peerPresenceTimer)
     clearInterval(session.microphoneTimer)
     session.abort.abort()
     if (session.pc) {
@@ -241,6 +245,39 @@ export class JingleCall {
     this.generation += 1
     if (this.session) this.cleanup(this.session)
     this.onChange(null)
+  }
+
+  signalingLost () {
+    const session = this.session
+    if (!session) return
+    if (session.phase !== 'active') {
+      this.finish(session, 'connectivity-error', SIGNALING_ERROR, false)
+    } else if (!session.signalingTimer) {
+      session.signalingTimer = setTimeout(() => {
+        this.finish(session, 'connectivity-error', SIGNALING_ERROR, false)
+      }, SIGNALING_TIMEOUT)
+    }
+  }
+
+  signalingRestored () {
+    if (!this.session) return
+    clearTimeout(this.session.signalingTimer)
+    this.session.signalingTimer = null
+  }
+
+  peerAvailabilityChanged (peer, available) {
+    const session = this.session
+    if (session?.peer !== peer) return
+    if (available) {
+      clearTimeout(session.peerPresenceTimer)
+      session.peerPresenceTimer = null
+    } else if (session.phase !== 'active') {
+      this.finish(session, 'gone', REMOTE_END_MESSAGES.gone, false)
+    } else if (!session.peerPresenceTimer) {
+      session.peerPresenceTimer = setTimeout(() => {
+        this.finish(session, 'gone', REMOTE_END_MESSAGES.gone)
+      }, SIGNALING_TIMEOUT)
+    }
   }
 
   async end () {
