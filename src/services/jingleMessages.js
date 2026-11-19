@@ -34,6 +34,11 @@ function idPresent (value) {
   return typeof value === 'string' && value.length > 0 && !/\s/.test(value)
 }
 
+export function readReason (reason) {
+  return reason?.getChildElements()
+    .find(child => child.getName() !== 'text' && child.getNS() === JINGLE)?.getName()
+}
+
 export function readInvitation (stanza, ownJid) {
   if (!ownJid?.bare || !ownJid.full || !liveMessage(stanza) || stanza.parent?.is('forwarded', FORWARDED)) return null
 
@@ -79,8 +84,7 @@ export function readInvitation (stanza, ownJid) {
     if (!media.includes('audio') || !(media.length === 1 || (media.length === 2 && media.includes('video')))) return null
   }
 
-  const reason = payload.getChild('reason', JINGLE)?.getChildElements()
-    .find(child => child.getName() !== 'text' && child.getNS() === JINGLE)?.getName()
+  const reason = readReason(payload.getChild('reason', JINGLE))
   const requestsReceipt = !carbon && !ownSender && message.getChild('request', RECEIPTS) && !message.getChild('received', RECEIPTS)
   const receiptId = requestsReceipt && idPresent(message.attrs.id) ? message.attrs.id : undefined
   return { from, to, action, id, media, reason, receiptId }

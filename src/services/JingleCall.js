@@ -2,6 +2,7 @@ import jid from '@xmpp/jid'
 import xml from '@xmpp/xml'
 import { nanoid } from 'nanoid'
 import { descriptionToJingle, jingleToDescription, transportCandidates } from './jingleMedia.js'
+import { readReason } from './jingleMessages.js'
 import { JINGLE, RTP, RTP_INFO, ICE } from './jingleNamespaces.js'
 
 const RING_TIMEOUT = 60000
@@ -616,8 +617,9 @@ export class JingleCall {
       case 'session-accept':
         return this.receiveAnswer(session, jingle)
       case 'session-terminate': {
-        const reason = jingle.getChild('reason', JINGLE)?.getChildElements()[0]?.name || 'success'
-        const code = Object.hasOwn(REMOTE_END_MESSAGES, reason) ? reason : 'general-error'
+        const reason = jingle.getChild('reason', JINGLE)
+        const condition = readReason(reason) ?? (reason?.getChildElements().length ? 'general-error' : 'success')
+        const code = Object.hasOwn(REMOTE_END_MESSAGES, condition) ? condition : 'general-error'
         this.finish(session, code, REMOTE_END_MESSAGES[code], false)
         return
       }

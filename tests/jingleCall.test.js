@@ -335,6 +335,16 @@ test('buffers valid trickle ICE and rejects actions from another resource or ses
   await accepting
 })
 
+test('uses the Jingle termination condition when explanatory text comes first', async t => {
+  const { controller, states } = setup(BOB)
+  t.after(() => controller.reset())
+  await controller.receive(ALICE, invitationOffer('call'))
+  await controller.receive(ALICE, request('session-terminate', 'call', xml('reason', {},
+    xml('text', {}, 'The contact declined.'), xml('busy', { xmlns: 'urn:example:other' }), xml('decline'))))
+  assert.equal(states.at(-1).reason, 'decline')
+  assert.match(states.at(-1).error, /declined/)
+})
+
 test('signals busy for another call and decline for the currently ringing call', async t => {
   const bob = setup(BOB)
   t.after(() => bob.controller.reset())
