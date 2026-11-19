@@ -42,7 +42,7 @@ export default {
       isLoaded: false,
       isProcessing: false,
       profile: {},
-      fields: this.$xmpp.client.getVCardAttributes().filter(attribute => attribute.type === 'input'),
+      fields: this.$xmpp.client?.getVCardAttributes().filter(attribute => attribute.type === 'input') ?? [],
       defaultAvatar,
       error: null,
     }
@@ -50,6 +50,7 @@ export default {
   computed: {
   },
   async created () {
+    if (!this.$xmpp.client) return
     this.profile = await this.$xmpp.getProfile()
     this.isLoaded = true
   },

@@ -85,6 +85,7 @@ export default {
 
   // connect client to XMPP server
   connect () {
+    const client = this.client
     const timeoutDuration = connectTimeout || 5000
     let timeoutId = null
     const timeoutPromise = new Promise((resolve, reject) => {
@@ -97,12 +98,13 @@ export default {
     const connectPromise = new Promise((resolve, reject) => {
 
       // listen for XMPP error
-      this.client.on('error', (error) => {
+      client.on('error', (error) => {
         console.error('XMPP error', error.message)
       })
 
       // listen for authentication success
-      this.client.on('authenticated', (jid) => {
+      client.on('authenticated', (jid) => {
+        if (client !== this.client) return
         if (!this.isAnonymous) {
           localStorage.setItem('barejid', jid.bare)
           localStorage.setItem('jid', this.jid)
@@ -116,7 +118,7 @@ export default {
         resolve()
       })
 
-      this.client.connect()
+      client.connect()
         .catch((error) => {
           // listen for authentication failure
           if (error.name === 'SASLError') {
@@ -171,12 +173,13 @@ export default {
     })
 
     // get contacts (rfc6121)
-    this.client.getRoster()
+    client.getRoster()
       .then((rosterResult) => {
+        if (client !== this.client) return
         this.context.$store.setRoster(rosterResult)
 
         // send presence to contacts (rfc6121)
-        this.client.sendPresence()
+        return client.sendPresence()
       })
       .catch((rosterError) => logError(rosterError, 'error', 'getRoster', rosterError.message, rosterError))
 
@@ -188,8 +191,9 @@ export default {
       .catch((error) => logError(error, 'error', 'carbon', error.message, error))
 
     // get bookmarked rooms (XEP-0048: Bookmarks)
-    this.client.getBookmarks()
+    client.getBookmarks()
       .then((mucBookmarks) => {
+        if (client !== this.client) return
         mucBookmarks.forEach((bookmark) => {
           const room = this.setRoomAttributes(bookmark.jid, null, bookmark.password)
           room.isBookmarked = true
@@ -204,8 +208,9 @@ export default {
         })
         // get rooms attributes
         mucBookmarks.forEach((muc) => {
-          this.client.getDiscoInfo(muc.jid)
+          client.getDiscoInfo(muc.jid)
             .then((mucDiscoInfoResult) => {
+              if (client !== this.client) return
               const room = this.setRoomAttributes(muc.jid, mucDiscoInfoResult, muc.password)
               room.isBookmarked = true
               this.context.$store.setKnownRoom(room)
@@ -216,9 +221,9 @@ export default {
       .catch((error) => logError(error, 'error', 'getBookmarks', error.message, error))
 
     // get HTTP file upload capacity (XEP-0363)
-    this.client.getUploadService()
+    client.getUploadService()
       .then((UploadServiceResult) => {
-        if (UploadServiceResult.maxSize) {
+        if (client === this.client && UploadServiceResult.maxSize) {
           this.context.$store.setHttpFileUploadMaxSize(UploadServiceResult.maxSize)
         }
       })
