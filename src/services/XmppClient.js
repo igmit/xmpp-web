@@ -118,7 +118,11 @@ class XmppClient {
       const info = this.discoInfoCache.get(this.jid.domain)
       if (!info || info.features.includes(EXTDISCO)) {
         const services = await this.xmpp.iqCaller.get(xml('services', { xmlns: EXTDISCO }), this.jid.domain, 5000)
-        if (services) return [...configured, ...iceServersFromServices(services)]
+        if (services) {
+          const discovered = await iceServersFromServices(services, request =>
+            this.xmpp.iqCaller.get(request, this.jid.domain, 5000))
+          return [...configured, ...discovered]
+        }
       }
     } catch {
       // Calls on the LAN or with configured ICE servers can still connect.

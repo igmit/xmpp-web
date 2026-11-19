@@ -39,28 +39,50 @@ export function stanzaError (condition, jingleCondition) {
 }
 
 // RTCIceServer URLs use a different syntax for STUN and TURN (RFC 7064/7065).
-export function iceServersFromServices (services) {
-  const servers = []
-  for (const service of services.getChildren('service', EXTDISCO)) {
-    const { type, host, port, transport, username, password } = service.attrs
-    if (!['stun', 'turn', 'turns'].includes(type) || !host || /[^\w.:\-[\]]/.test(host)) continue
-    if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) continue
-    if (transport && !['udp', 'tcp'].includes(transport)) continue
-    if (type === 'stun' && transport === 'tcp') continue
-    const hostname = host.includes(':') && !host.startsWith('[') ? '[' + host + ']' : host
-    try {
-      new URL('http://' + hostname)
-    } catch {
-      continue
-    }
-    const server = { urls: type + ':' + hostname + (port ? ':' + port : '') }
-    if (type !== 'stun') {
-      if (!username || !password) continue
-      if (transport) server.urls += '?transport=' + transport
-      server.username = username
-      server.credential = password
-    }
-    servers.push(server)
+function iceServerUrl ({ type, host, port, transport }) {
+  if (!['stun', 'turn', 'turns'].includes(type) || !host || /[^\w.:\-[\]]/.test(host)) return
+  if (port && (!/^\d+$/.test(port) || Number(port) < 1 || Number(port) > 65535)) return
+  if (transport && !['udp', 'tcp'].includes(transport)) return
+  if (type === 'stun' && transport === 'tcp') return
+  const hostname = host.includes(':') && !host.startsWith('[') ? '[' + host + ']' : host
+  try {
+    new URL('http://' + hostname)
+  } catch {
+    return
   }
-  return servers
+  return type + ':' + hostname + (port ? ':' + port : '') +
+    (type !== 'stun' && transport ? '?transport=' + transport : '')
+}
+
+async function resolveIceService (service, requestCredentials) {
+  const { type, host, port, transport, restricted, username, password } = service.attrs
+  const urls = iceServerUrl(service.attrs)
+  if (!urls) return []
+  if (type === 'stun') return [{ urls }]
+  if (username && password) return [{ urls, username, credential: password }]
+  if (!requestCredentials || !['1', 'true'].includes(restricted)) return []
+
+  try {
+    const request = xml('credentials', { xmlns: EXTDISCO }, xml('service', { host, type, port }))
+    const reply = await requestCredentials(request)
+    const servers = []
+    for (const entry of reply?.getChildren('service', EXTDISCO) ?? []) {
+      const credentials = entry.attrs
+      if (credentials.host !== host || credentials.type !== type || !credentials.username || !credentials.password) continue
+      if (port && credentials.port && Number(port) !== Number(credentials.port)) continue
+      if (transport && credentials.transport && transport !== credentials.transport) continue
+      const resolvedUrl = iceServerUrl({ type, host, port: port ?? credentials.port, transport: transport ?? credentials.transport })
+      if (resolvedUrl) servers.push({ urls: resolvedUrl, username: credentials.username, credential: credentials.password })
+    }
+    return servers
+  } catch {
+    // One unavailable credential service should not discard other ICE servers.
+    return []
+  }
+}
+
+export async function iceServersFromServices (services, requestCredentials) {
+  const servers = await Promise.all(services.getChildren('service', EXTDISCO)
+    .map(service => resolveIceService(service, requestCredentials)))
+  return servers.flat()
 }

@@ -20,7 +20,7 @@ test('publishes an entity capabilities hash matching the discoverable feature se
   assert.ok(caps.info('unknown').getChild('item-not-found'))
 })
 
-test('converts advertised STUN and TURN services to browser ICE configuration', () => {
+test('converts advertised STUN and TURN services to browser ICE configuration', async () => {
   const services = xml('services', { xmlns: EXTDISCO },
     xml('service', { type: 'stun', host: 'stun.example.org', port: '3478', transport: 'udp' }),
     xml('service', { type: 'turns', host: '2001:db8::1', port: '5349', transport: 'tcp', username: 'user', password: 'pass' }),
@@ -28,8 +28,35 @@ test('converts advertised STUN and TURN services to browser ICE configuration', 
     xml('service', { type: 'turn', host: 'bad[host]', username: 'user', password: 'pass' }),
     xml('service', { type: 'unrelated', host: 'example.org' }),
     xml('service', { type: 'stun', host: 'example.org', port: '70000' }))
-  assert.deepEqual(iceServersFromServices(services), [
+  assert.deepEqual(await iceServersFromServices(services), [
     { urls: 'stun:stun.example.org:3478' },
     { urls: 'turns:[2001:db8::1]:5349?transport=tcp', username: 'user', credential: 'pass' },
+  ])
+})
+
+test('requests credentials for restricted TURN services and keeps working servers on failure', async () => {
+  const services = xml('services', { xmlns: EXTDISCO },
+    xml('service', { type: 'stun', host: 'stun.example.org' }),
+    xml('service', { type: 'turns', host: 'relay.example.org', port: '5349', transport: 'tcp', restricted: '1' }),
+    xml('service', { type: 'turn', host: 'unavailable.example.org', restricted: 'true' }),
+    xml('service', { type: 'turn', host: 'inline.example.org', restricted: 'true', username: 'inline', password: 'inline-pass' }))
+  const requests = []
+  const servers = await iceServersFromServices(services, async request => {
+    assert.ok(request.is('credentials', EXTDISCO))
+    const service = request.getChild('service', EXTDISCO)
+    requests.push(service.attrs)
+    if (service.attrs.host === 'unavailable.example.org') throw new Error('service-unavailable')
+    return xml('credentials', { xmlns: EXTDISCO },
+      xml('service', { ...service.attrs, port: '443', username: 'unexpected', password: 'unexpected-pass' }),
+      xml('service', { ...service.attrs, username: 'temporary', password: 'temporary-pass' }))
+  })
+  assert.deepEqual(requests, [
+    { type: 'turns', host: 'relay.example.org', port: '5349' },
+    { type: 'turn', host: 'unavailable.example.org' },
+  ])
+  assert.deepEqual(servers, [
+    { urls: 'stun:stun.example.org' },
+    { urls: 'turns:relay.example.org:5349?transport=tcp', username: 'temporary', credential: 'temporary-pass' },
+    { urls: 'turn:inline.example.org', username: 'inline', credential: 'inline-pass' },
   ])
 })
