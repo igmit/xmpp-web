@@ -4,7 +4,7 @@ import { afterEach, beforeEach, test } from 'node:test'
 import { setImmediate, setTimeout } from 'node:timers/promises'
 import { xml } from '@xmpp/client'
 import JingleCall from '../src/services/JingleCall.js'
-import { JINGLE } from '../src/services/jingleNamespaces.js'
+import { JINGLE, RTP } from '../src/services/jingleNamespaces.js'
 import { descriptionToJingle } from '../src/services/jingleMedia.js'
 import { registerJingleCalls } from '../src/services/registerJingleCalls.js'
 
@@ -343,6 +343,30 @@ test('uses the Jingle termination condition when explanatory text comes first', 
     xml('text', {}, 'The contact declined.'), xml('busy', { xmlns: 'urn:example:other' }), xml('decline'))))
   assert.equal(states.at(-1).reason, 'decline')
   assert.match(states.at(-1).error, /declined/)
+})
+
+test('rejects an offered video upgrade without renegotiating the current call', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { controller, sent, states } = setup(ALICE)
+  t.after(() => controller.reset())
+  const pc = await startActiveCall(controller, sent)
+  const sid = sent[0].stanza.attrs.sid
+  const upgrade = name => request('content-add', sid, xml('content', { name, creator: 'responder', senders: 'responder' },
+    xml('description', { xmlns: RTP, media: 'video' }, xml('payload-type', { id: '96', name: 'VP8' })),
+    xml('transport', { xmlns: ICE, ufrag: 'test', pwd: 'abcdefghijklmnopqrstuvwxyz' })))
+  await assert.rejects(controller.receive(BOB, upgrade('0')), { condition: 'bad-request' })
+  await controller.receive(BOB, upgrade('camera'))
+  assert.equal(sent.length, 1)
+  t.mock.timers.tick(1)
+  const reject = sent.at(-1).stanza
+  assert.equal(reject.attrs.action, 'content-reject')
+  assert.equal(reject.attrs.sid, sid)
+  const content = reject.getChild('content', JINGLE)
+  assert.deepEqual(content.attrs, { name: 'camera', creator: 'responder', senders: 'responder' })
+  assert.equal(content.getChild('description', RTP).attrs.media, 'video')
+  assert.ok(content.getChild('transport', ICE))
+  assert.equal(states.at(-1).phase, 'active')
+  assert.equal(pc.connectionState, 'connected')
 })
 
 test('signals busy for another call and decline for the currently ringing call', async t => {

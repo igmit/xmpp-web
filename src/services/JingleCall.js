@@ -1,7 +1,7 @@
 import jid from '@xmpp/jid'
 import xml from '@xmpp/xml'
 import { nanoid } from 'nanoid'
-import { descriptionToJingle, jingleToDescription, transportCandidates } from './jingleMedia.js'
+import { descriptionToJingle, jingleToDescription, rejectedContents, transportCandidates } from './jingleMedia.js'
 import { readReason } from './jingleMessages.js'
 import { JINGLE, RTP, RTP_INFO, ICE } from './jingleNamespaces.js'
 
@@ -602,6 +602,18 @@ export class JingleCall {
     }
   }
 
+  rejectContentAddition (session, jingle) {
+    let contents
+    try {
+      contents = rejectedContents(jingle, session.mids)
+    } catch {
+      throw stanzaError('bad-request')
+    }
+    this.later(() => {
+      if (this.session === session) this.sendAction(session, 'content-reject', contents).catch(() => {})
+    })
+  }
+
   async receive (address, jingle) {
     const peer = fullJid(address)
     if (!this.ownJid || !peer || peer.bare().toString() === this.ownJid.bare().toString() || !jingle?.is('jingle', JINGLE)) {
@@ -625,6 +637,8 @@ export class JingleCall {
       }
       case 'transport-info':
         return this.receiveCandidates(session, jingle)
+      case 'content-add':
+        return this.rejectContentAddition(session, jingle)
       case 'session-info':
         if (jingle.getChildElements().every(info => info.is('ringing', RTP_INFO) || info.is('active', RTP_INFO))) return
         throw stanzaError('feature-not-implemented', 'unsupported-info')

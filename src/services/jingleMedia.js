@@ -327,7 +327,7 @@ function readRtpDescription(description, role) {
   return { ...media, ...readSources(description) }
 }
 
-function getContents(jingle) {
+function getContents(jingle, allowResponder = false) {
   validate(jingle?.is('jingle', NS.JINGLE), 'namespace')
   const contents = jingle.getChildren('content')
   validate(contents.length && contents.every(content => content.is('content', NS.JINGLE)), 'contents')
@@ -335,11 +335,24 @@ function getContents(jingle) {
   for (const { attrs } of contents) {
     const mid = token(attrs.name, 'content name')
     validate(!mids.has(mid), 'duplicate content name')
-    validate(attrs.creator === 'initiator', 'content creator')
+    validate(attrs.creator === 'initiator' || (allowResponder && attrs.creator === 'responder'), 'content creator')
     validate(attrs.disposition === undefined || attrs.disposition === 'session', 'content disposition')
     mids.add(mid)
   }
   return contents
+}
+
+export function rejectedContents(jingle, mids) {
+  return getContents(jingle, true).map(content => {
+    const { name, creator, senders } = content.attrs
+    validate(!mids.includes(name), 'existing content name')
+    sendersToDirection(senders, creator)
+    const { media } = requiredChild(content, 'description', NS.RTP).attrs
+    validate(media === 'audio' || media === 'video', 'media type')
+    requiredChild(content, 'transport', NS.ICE)
+    return xml('content', { name, creator, senders }, xml('description', { xmlns: NS.RTP, media }),
+      xml('transport', { xmlns: NS.ICE }))
+  })
 }
 
 export function jingleToDescription(jingle, role, expectedMids) {
