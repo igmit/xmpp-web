@@ -2,7 +2,8 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { xml } from '@xmpp/client'
-import { callCapabilities, EXTDISCO, iceServersFromServices } from '../src/services/jingleDiscovery.js'
+import { callCapabilities, iceServersFromServices } from '../src/services/jingleDiscovery.js'
+import { EXTDISCO } from '../src/services/jingleNamespaces.js'
 
 test('publishes an entity capabilities hash matching the discoverable feature set', async () => {
   const chatFeatures = ['http://jabber.org/protocol/chatstates', 'urn:xmpp:reactions:0']

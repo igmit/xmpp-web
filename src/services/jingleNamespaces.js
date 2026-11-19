@@ -1,3 +1,5 @@
+export const CAPS = 'http://jabber.org/protocol/caps'
+export const EXTDISCO = 'urn:xmpp:extdisco:2'
 export const JINGLE = 'urn:xmpp:jingle:1'
 export const JINGLE_MESSAGE = 'urn:xmpp:jingle-message:0'
 export const RTP = 'urn:xmpp:jingle:apps:rtp:1'

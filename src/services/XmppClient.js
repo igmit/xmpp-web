@@ -1,8 +1,7 @@
 import { client, xml, jid as createJid } from '@xmpp/client'
 import XMPPError from '@xmpp/error'
 import { nanoid } from 'nanoid'
-import { JINGLE } from './jingleNamespaces.js'
-import { CAPS, EXTDISCO, callCapabilities, iceServersFromServices, stanzaError } from './jingleDiscovery'
+import { CAPS, EXTDISCO, JINGLE } from './jingleNamespaces.js'
 
 const hasDebug = true
 const hasChatState = true
@@ -94,7 +93,8 @@ class XmppClient {
   enableCalls (receive, handleInvitation) {
     this.handleInvitation = handleInvitation
     const chatFeatures = hasChatState ? [NS.REACTIONS, NS.CHAT_STATE] : [NS.REACTIONS]
-    this.capabilities = callCapabilities(chatFeatures)
+    const discovery = import('./jingleDiscovery.js')
+    this.capabilities = discovery.then(({ callCapabilities }) => callCapabilities(chatFeatures))
     this.xmpp.iqCallee.get(NS.DISCO_INFO, 'query', async ({ element }) =>
       (await this.capabilities).info(element.attrs.node))
     this.xmpp.iqCallee.set(JINGLE, 'jingle', async ({ stanza, element }) => {
@@ -102,6 +102,7 @@ class XmppClient {
         await receive(stanza.attrs.from, element)
         return true // iqCallee sends an empty result for a handled request
       } catch (error) {
+        const { stanzaError } = await discovery
         return stanzaError(error.condition || 'internal-server-error', error.jingleCondition)
       }
     })
@@ -119,6 +120,7 @@ class XmppClient {
       if (!info || info.features.includes(EXTDISCO)) {
         const services = await this.xmpp.iqCaller.get(xml('services', { xmlns: EXTDISCO }), this.jid.domain, 5000)
         if (services) {
+          const { iceServersFromServices } = await import('./jingleDiscovery.js')
           const discovered = await iceServersFromServices(services, request =>
             this.xmpp.iqCaller.get(request, this.jid.domain, 5000))
           return [...configured, ...discovered]

@@ -1,8 +1,6 @@
 import xml from '@xmpp/xml'
-import { JINGLE, JINGLE_MESSAGE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK } from './jingleNamespaces.js'
+import { CAPS, EXTDISCO, JINGLE, JINGLE_MESSAGE, RTP, AUDIO, VIDEO, ICE, DTLS, HEADER_EXT, FEEDBACK } from './jingleNamespaces.js'
 
-export const EXTDISCO = 'urn:xmpp:extdisco:2'
-export const CAPS = 'http://jabber.org/protocol/caps'
 const DISCO = 'http://jabber.org/protocol/disco#info'
 const NODE = 'https://github.com/nioc/xmpp-web'
 const identity = { category: 'client', type: 'web', name: 'XMPP Web' }
