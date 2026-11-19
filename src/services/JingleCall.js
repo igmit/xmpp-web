@@ -1,13 +1,12 @@
 import jid from '@xmpp/jid'
 import xml from '@xmpp/xml'
 import { nanoid } from 'nanoid'
-import { descriptionToJingle, jingleToDescription, rejectedContents, transportCandidates } from './jingleMedia.js'
+import { descriptionToJingle, jingleToDescription, rejectedContents, transportCandidates, trickleToJingle } from './jingleMedia.js'
 import { readReason } from './jingleMessages.js'
-import { JINGLE, RTP, RTP_INFO, ICE } from './jingleNamespaces.js'
+import { JINGLE, RTP, RTP_INFO } from './jingleNamespaces.js'
 
 const RING_TIMEOUT = 60000
 const CONNECTION_TIMEOUT = 35000
-const ICE_GATHERING_TIMEOUT = 15000
 const RECOVERY_TIMEOUT = 10000
 const SIGNALING_TIMEOUT = 30000
 const SIGNALING_ERROR = 'The call ended because the XMPP connection was lost.'
@@ -91,26 +90,6 @@ function localError (error, video) {
 
 function setupError (message) {
   return Object.assign(new Error(message), { name: 'CallSetupError' })
-}
-
-function waitForIce (pc, signal) {
-  if (pc.iceGatheringState === 'complete') return Promise.resolve(true)
-  if (signal.aborted) return Promise.resolve(false)
-  return new Promise(resolve => {
-    const finish = complete => {
-      clearTimeout(timer)
-      pc.removeEventListener('icegatheringstatechange', onGathering)
-      signal.removeEventListener('abort', onAbort)
-      resolve(complete)
-    }
-    const onAbort = () => finish(false)
-    const onGathering = () => {
-      if (pc.iceGatheringState === 'complete') finish(true)
-    }
-    const timer = setTimeout(() => finish(false), ICE_GATHERING_TIMEOUT)
-    pc.addEventListener('icegatheringstatechange', onGathering)
-    signal.addEventListener('abort', onAbort, { once: true })
-  })
 }
 
 export class JingleCall {
@@ -223,6 +202,7 @@ export class JingleCall {
     if (session.pc) {
       session.pc.ontrack = null
       session.pc.onconnectionstatechange = null
+      session.pc.onicecandidate = null
       session.pc.close()
     }
     stopTracks(session.localStream)
@@ -269,6 +249,7 @@ export class JingleCall {
     if (!this.session) return
     clearTimeout(this.session.signalingTimer)
     this.session.signalingTimer = null
+    this.sendLocalCandidates(this.session)
   }
 
   peerAvailabilityChanged (peer, available) {
@@ -330,6 +311,7 @@ export class JingleCall {
       this.publish(session)
     }
     pc.onconnectionstatechange = () => this.connectionChanged(session)
+    pc.onicecandidate = () => this.sendLocalCandidates(session)
     for (const track of stream.getTracks()) {
       const sender = pc.addTrack(track, stream)
       if (track.kind === 'audio') session.microphoneSender = sender
@@ -413,13 +395,22 @@ export class JingleCall {
     if (this.session !== session) return null
     const pc = session.pc
     await pc.setLocalDescription(description)
-    const completed = await waitForIce(pc, session.abort.signal)
     if (this.session !== session) return null
-    const children = descriptionToJingle(pc.localDescription.sdp, role)
-    if (!completed && !children.some(child => child.getChild('transport', ICE)?.getChild('candidate', ICE))) {
-      throw setupError('Timed out while gathering network addresses for the call.')
-    }
-    return children
+    session.sentCandidates = new Set()
+    return descriptionToJingle(pc.localDescription.sdp, role, session.sentCandidates)
+  }
+
+  async sendDescription (session, action, children) {
+    await this.sendAction(session, action, children)
+    session.localDescriptionSent = true
+    this.sendLocalCandidates(session)
+  }
+
+  sendLocalCandidates (session) {
+    if (this.session !== session || !session.localDescriptionSent || session.signalingTimer) return
+    // The browser adds gathered candidates to local SDP before dispatching icecandidate.
+    const contents = trickleToJingle(session.pc.localDescription.sdp, session.sentCandidates)
+    if (contents.length) this.sendAction(session, 'transport-info', contents).catch(() => {})
   }
 
   async remoteDescription (session, description) {
@@ -446,7 +437,7 @@ export class JingleCall {
       session.mids = children.filter(child => child.name === 'content').map(content => content.attrs.name)
       session.signalled = true
       this.schedulePhaseTimeout(session)
-      await this.sendAction(session, 'session-initiate', children)
+      await this.sendDescription(session, 'session-initiate', children)
     } catch (error) {
       if (session.phase === 'outgoing') this.finish(session, 'failed-application', localError(error, session.video), !error?.condition)
     }
@@ -478,7 +469,7 @@ export class JingleCall {
       const children = await this.localDescription(session, await pc.createAnswer(), 'responder')
       if (!children) return
       session.accepted = true
-      await this.sendAction(session, 'session-accept', children)
+      await this.sendDescription(session, 'session-accept', children)
       session.negotiated = true
       this.connectionChanged(session)
     } catch (error) {

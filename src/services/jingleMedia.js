@@ -134,16 +134,15 @@ function writeRtpDescription(session, media, role) {
     writeSources(media))
 }
 
-function writeIceTransport(session, media) {
-  const fingerprint = media.fingerprint ?? session.fingerprint
-  const ufrag = media.iceUfrag ?? session.iceUfrag
-  const pwd = media.icePwd ?? session.icePwd
-  const setup = media.setup ?? session.setup
-  validate(fingerprint && ufrag && pwd && setup, 'local ICE/DTLS description')
-  const candidates = (media.candidates ?? []).filter(candidate => candidate.transport.toLowerCase() === 'udp')
-  return xml('transport', { xmlns: NS.ICE, ufrag, pwd },
-    xml('fingerprint', { xmlns: NS.DTLS, hash: fingerprint.type, setup }, fingerprint.hash),
-    candidates.map(candidate => xml('candidate', {
+function writeIceCandidates(media, ufrag, sentCandidates) {
+  return (media.candidates ?? []).flatMap(candidate => {
+    if (candidate.transport.toLowerCase() !== 'udp') return []
+    if (sentCandidates) {
+      const key = JSON.stringify([media.mid, ufrag, candidate])
+      if (sentCandidates.has(key)) return []
+      sentCandidates.add(key)
+    }
+    return xml('candidate', {
       id: 'c' + nanoid(12),
       foundation: candidate.foundation,
       component: candidate.component,
@@ -155,10 +154,22 @@ function writeIceTransport(session, media) {
       'rel-addr': candidate.raddr,
       'rel-port': candidate.rport,
       generation: candidate.generation ?? 0,
-    })))
+    })
+  })
 }
 
-export function descriptionToJingle(sdp, role) {
+function writeIceTransport(session, media, sentCandidates) {
+  const fingerprint = media.fingerprint ?? session.fingerprint
+  const ufrag = media.iceUfrag ?? session.iceUfrag
+  const pwd = media.icePwd ?? session.icePwd
+  const setup = media.setup ?? session.setup
+  validate(fingerprint && ufrag && pwd && setup, 'local ICE/DTLS description')
+  return xml('transport', { xmlns: NS.ICE, ufrag, pwd },
+    xml('fingerprint', { xmlns: NS.DTLS, hash: fingerprint.type, setup }, fingerprint.hash),
+    writeIceCandidates(media, ufrag, sentCandidates))
+}
+
+export function descriptionToJingle(sdp, role, sentCandidates) {
   validateRole(role)
   const session = sdpTransform.parse(sdp)
   const mids = validateMedia(session.media)
@@ -175,9 +186,21 @@ export function descriptionToJingle(sdp, role) {
       creator: 'initiator',
       name: mids[index],
       senders: directionToSenders(media.direction ?? session.direction, role),
-    }, writeRtpDescription(session, media, role), writeIceTransport(session, media))
+    }, writeRtpDescription(session, media, role), writeIceTransport(session, media, sentCandidates))
   })
   return [...groups, ...contents]
+}
+
+export function trickleToJingle(sdp, sentCandidates) {
+  const session = sdpTransform.parse(sdp)
+  return session.media.flatMap(media => {
+    const ufrag = media.iceUfrag ?? session.iceUfrag
+    const pwd = media.icePwd ?? session.icePwd
+    const candidates = writeIceCandidates(media, ufrag, sentCandidates)
+    if (!candidates.length) return []
+    return xml('content', { creator: 'initiator', name: String(media.mid) },
+      xml('transport', { xmlns: NS.ICE, ufrag, pwd }, candidates))
+  })
 }
 
 function requiredChild(element, name, namespace) {

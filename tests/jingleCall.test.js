@@ -110,10 +110,9 @@ class FakePeer extends EventTarget {
 
   async setRemoteDescription (description) { this.remoteDescription = description }
 
-  finishGathering () {
-    this.localDescription.sdp += `a=${candidate}\r\n`
-    this.iceGatheringState = 'complete'
-    this.dispatchEvent(new Event('icegatheringstatechange'))
+  gather (value = candidate) {
+    this.localDescription.sdp += `a=${value}\r\n`
+    this.onicecandidate?.()
   }
 
   async addIceCandidate (value) { this.candidates.push(value) }
@@ -153,11 +152,8 @@ afterEach(() => {
 })
 
 async function startActiveCall (controller, sent) {
-  const starting = controller.start(BOB)
-  await setImmediate()
+  await controller.start(BOB)
   const pc = FakePeer.instances.at(-1)
-  pc.finishGathering()
-  await starting
   const [{ stanza: offer }] = sent
   const answer = offerSdp(false).replaceAll('a=setup:actpass', 'a=setup:active')
   await controller.receive(BOB, request('session-accept', offer.attrs.sid, ...descriptionToJingle(answer, 'responder')))
@@ -244,7 +240,7 @@ test('gives the call peer time to return on the same resource', async t => {
 })
 
 for (const video of [false, true]) {
-  test(`connects and ends a ${video ? 'video and audio' : 'voice'} call after gathering ICE`, async t => {
+  test(`connects and ends a ${video ? 'video and audio' : 'voice'} call using trickle ICE`, async t => {
     const iceServers = [{ urls: 'turn:turn.example.org', username: 'user', credential: 'credential' }]
     const alice = setup(ALICE, { iceServers: async () => iceServers })
     const bob = setup(BOB)
@@ -255,36 +251,40 @@ for (const video of [false, true]) {
 
     const starting = alice.controller.start(BOB, video)
     assert.equal(alice.states.at(-1).phase, 'outgoing')
-    await setImmediate()
+    await starting
     const [alicePc] = FakePeer.instances
     assert.deepEqual(alicePc.config.iceServers, iceServers)
-    assert.equal(alice.sent.length, 0)
-    alicePc.finishGathering()
-    await starting
 
     const offer = alice.sent[0].stanza
     assert.equal(offer.attrs.action, 'session-initiate')
     assert.equal(offer.attrs.initiator, ALICE)
     assert.equal(alice.sent[0].peer, BOB)
     assert.equal(offer.getChildren('content').length, video ? 2 : 1)
-    assert.ok(offer.getChildren('content').at(-1).getChild('transport', ICE).getChild('candidate', ICE))
+    assert.equal(offer.getChildren('content').at(-1).getChild('transport', ICE).getChild('candidate', ICE), undefined)
     await bob.controller.receive(ALICE, offer)
     assert.equal(bob.states.at(-1).phase, 'incoming')
     assert.equal(bob.states.at(-1).video, video)
     assert.equal(captureRequests.length, 1)
+    alicePc.gather()
+    const trickle = alice.sent.at(-1).stanza
+    assert.equal(trickle.attrs.action, 'transport-info')
+    assert.ok(trickle.getChild('content').getChild('transport', ICE).getChild('candidate', ICE))
+    await bob.controller.receive(ALICE, trickle)
 
     const accepting = bob.controller.accept()
     assert.equal(bob.states.at(-1).phase, 'connecting')
-    await setImmediate()
+    await accepting
     const bobPc = FakePeer.instances[1]
     assert.deepEqual(captureRequests, [{ audio: true, video }, { audio: true, video }])
-    bobPc.finishGathering()
-    await accepting
+    assert.equal(bobPc.candidates.length, 1)
 
     const answer = bob.sent.find(({ stanza }) => stanza.attrs.action === 'session-accept').stanza
     assert.equal(answer.attrs.sid, offer.attrs.sid)
     assert.equal(answer.attrs.responder, BOB)
     await alice.controller.receive(BOB, answer)
+    bobPc.gather()
+    await alice.controller.receive(BOB, bob.sent.at(-1).stanza)
+    assert.equal(alicePc.candidates.length, 1)
     assert.equal(alice.states.at(-1).phase, 'connecting')
     alicePc.connect()
     bobPc.connect()
@@ -326,13 +326,10 @@ test('buffers valid trickle ICE and rejects actions from another resource or ses
   await bob.controller.receive(ALICE, trickle)
   assert.equal(FakePeer.instances.length, 0)
 
-  const accepting = bob.controller.accept()
-  await setImmediate()
+  await bob.controller.accept()
   const [pc] = FakePeer.instances
   assert.deepEqual(pc.candidates.map(value => value.sdpMid), ['0'])
   assert.match(pc.candidates[0].candidate, /192\.0\.2\.2/)
-  pc.finishGathering()
-  await accepting
 })
 
 test('uses the Jingle termination condition when explanatory text comes first', async t => {
@@ -414,11 +411,7 @@ test('can retry a microphone that is already ended at setup and releases a late 
   const ended = new FakeTrack('audio')
   ended.stop()
   mockCapture(async () => new FakeStream([ended]))
-  const starting = alice.controller.start(BOB)
-  await setImmediate()
-  const pc = FakePeer.instances[0]
-  pc.finishGathering()
-  await starting
+  await alice.controller.start(BOB)
   assert.equal(alice.states.at(-1).microphoneStatus, 'unavailable')
 
   mockCapture(async () => { throw Object.assign(new Error(), { name: 'NotAllowedError' }) })
@@ -505,32 +498,37 @@ test('reports denied camera permission after acceptance and signals a failed ses
   assert.equal(FakePeer.instances.length, 0)
 })
 
-test('uses already gathered candidates when an ICE server stalls', async t => {
-  t.mock.timers.enable({ apis: ['setTimeout'] })
-  const alice = setup(ALICE)
+test('queues gathered candidates until the offer is acknowledged and sends each once', async t => {
+  let acknowledgeOffer
+  const sent = []
+  const alice = setup(ALICE, { send: async (peer, stanza) => {
+    sent.push(stanza)
+    if (stanza.attrs.action === 'session-initiate') await new Promise(resolve => { acknowledgeOffer = resolve })
+  } })
   t.after(() => alice.controller.reset())
   const starting = alice.controller.start(BOB)
   await setImmediate()
   const [pc] = FakePeer.instances
-  pc.localDescription.sdp += `a=${candidate}\r\n`
-  t.mock.timers.tick(15000)
+  pc.gather()
+  assert.deepEqual(sent.map(stanza => stanza.attrs.action), ['session-initiate'])
+  acknowledgeOffer()
   await starting
-  assert.equal(alice.sent[0].stanza.attrs.action, 'session-initiate')
-  assert.equal(alice.states.at(-1).phase, 'outgoing')
+  pc.gather()
+  assert.deepEqual(sent.map(stanza => stanza.attrs.action), ['session-initiate', 'transport-info'])
+  pc.gather(candidate.replace('50900', '50901'))
+  assert.equal(sent.at(-1).getChild('content').getChild('transport', ICE).getChild('candidate', ICE).attrs.port, '50901')
 })
 
-test('closes media when ICE gathering times out without a candidate', async t => {
+test('closes media when the outgoing call times out while ICE is still gathering', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const alice = setup(ALICE)
   t.after(() => alice.controller.reset())
-  const starting = alice.controller.start(BOB)
-  await setImmediate()
+  await alice.controller.start(BOB)
   const [pc] = FakePeer.instances
-  t.mock.timers.tick(15000)
-  await starting
-  assert.equal(alice.sent.length, 0)
+  t.mock.timers.tick(60000)
+  assert.deepEqual(alice.sent.map(({ stanza }) => stanza.attrs.action), ['session-initiate', 'session-terminate'])
   assert.equal(alice.states.at(-1).phase, 'ended')
-  assert.match(alice.states.at(-1).error, /Timed out while gathering/)
+  assert.match(alice.states.at(-1).error, /did not answer/)
   assert.ok(pc.tracks.every(track => track.stopped))
   assert.equal(pc.connectionState, 'closed')
 })
@@ -542,10 +540,7 @@ test('resolves simultaneous equivalent calls by the lower session ID', async t =
     alice.controller.reset()
     bob.controller.reset()
   })
-  const starting = Promise.all([alice.controller.start(BOB), bob.controller.start(ALICE)])
-  await setImmediate()
-  FakePeer.instances.forEach(pc => pc.finishGathering())
-  await starting
+  await Promise.all([alice.controller.start(BOB), bob.controller.start(ALICE)])
 
   const aliceOffer = alice.sent[0].stanza
   const bobOffer = bob.sent[0].stanza
@@ -610,7 +605,6 @@ test('answers a message invitation only after consent and a matching Jingle offe
   assert.deepEqual(captureRequests, [{ audio: true, video: true }])
   assert.equal(bob.states.filter(state => state.phase === 'incoming').length, 1)
   const [pc] = FakePeer.instances
-  pc.finishGathering()
   await setImmediate()
   assert.equal(bob.sent.find(({ stanza }) => stanza.attrs.action === 'session-accept').stanza.attrs.sid, sid)
   pc.connect()
