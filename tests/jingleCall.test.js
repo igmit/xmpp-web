@@ -585,7 +585,11 @@ test('rings two devices and starts a Jingle session only with the first device t
   await alice.controller.start('bob@example.org', true)
   const [proposal] = alice.invitations
   const { sid } = proposal
-  assert.deepEqual(proposal, { peer: 'bob@example.org', action: 'propose', sid, reason: undefined, media: ['audio', 'video'] })
+  assert.ok(proposal.messageId)
+  assert.notEqual(proposal.messageId, sid)
+  assert.deepEqual(proposal, {
+    peer: 'bob@example.org', action: 'propose', sid, reason: undefined, messageId: alice.controller.session.proposalMessageId, media: ['audio', 'video'],
+  })
   assert.deepEqual(captureRequests, [])
   assert.deepEqual(alice.sent, [])
   await phone.controller.receiveInvitation(ALICE, 'propose', sid, proposal.media, proposal.peer)

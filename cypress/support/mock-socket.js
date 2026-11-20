@@ -35,6 +35,7 @@ export function MockServer({ url, jidLocal, jidDomain } ) {
         return
       }
       if (data.endsWith('<query xmlns="jabber:iq:roster"/></iq>')) {
+        mockServer.beforeRosterReply?.()
         socket.send(`<iq to='${jidLocal}@${jidDomain}/${resource}' id='${getIqId(data)}' xmlns='jabber:client' type='result'><query xmlns='jabber:iq:roster'><item name='' subscription='both' jid='user2@${jidDomain}'><group>Dev Team</group></item></query></iq>`)
         return
       }

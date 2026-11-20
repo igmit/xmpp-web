@@ -449,10 +449,14 @@ export class JingleCall {
     const session = this.createSession(crypto.randomUUID(), proposedTo, Boolean(video), 'outgoing', {
       invitation: true,
       proposedTo,
+      proposalMessageId: nanoid(),
     })
     if (this.session !== session) return
     try {
-      await this.sendInvitation(proposedTo, 'propose', session.sid, { media: video ? ['audio', 'video'] : ['audio'] })
+      await this.sendInvitation(proposedTo, 'propose', session.sid, {
+        messageId: session.proposalMessageId,
+        media: video ? ['audio', 'video'] : ['audio'],
+      })
     } catch {
       if (!session.proceeded) this.finish(session, 'failed-application', 'Could not send the call invitation.', false)
     }

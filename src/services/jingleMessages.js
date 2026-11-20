@@ -107,10 +107,20 @@ export function readInvitation (stanza, ownJid) {
   return { from, to, action, id, media, reason, receiptId, ...(delayedAt !== undefined && { delayedAt }) }
 }
 
-export function invitationMessage (to, action, id, { reason, media = [], tieBreak } = {}) {
+export function isProposalDeliveryError (stanza, ownJid, session) {
+  if (!session?.proposedTo || session.proceeded || session.ringing || !stanza?.is('message', CLIENT)) return false
+  const { type, id, from, to } = stanza.attrs
+  if (type !== 'error' || id !== session.proposalMessageId || !stanza.getChild('error', CLIENT)) return false
+  if (to && to !== ownJid.full && to !== ownJid.bare) return false
+  const peer = session.proposedTo
+  return !from || from === jid(ownJid.bare).getDomain() || from === jid(peer).getDomain() ||
+    address(from)?.bare().toString() === peer
+}
+
+export function invitationMessage (to, action, id, { reason, media = [], tieBreak, messageId = nanoid() } = {}) {
   const condition = reason ? xml('reason', { xmlns: JINGLE }, xml(reason)) : null
   const descriptions = media.map(kind => xml('description', { xmlns: RTP, media: kind }))
-  return xml('message', { to, type: 'chat', id: nanoid() },
+  return xml('message', { to, type: 'chat', id: messageId },
     xml(action, { xmlns: JINGLE_MESSAGE, id }, descriptions, condition, tieBreak && xml('tie-break')),
     xml('store', { xmlns: HINTS }))
 }

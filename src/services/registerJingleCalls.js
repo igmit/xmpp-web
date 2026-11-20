@@ -1,8 +1,9 @@
 import JingleCall, { RING_TIMEOUT } from './JingleCall.js'
-import { readInvitation, invitationMessage, receiptMessage } from './jingleMessages.js'
+import { readInvitation, isProposalDeliveryError, invitationMessage, receiptMessage } from './jingleMessages.js'
 
 const OFFLINE_DELIVERY_QUIET_PERIOD = 750
 const OFFLINE_DELIVERY_MAX_WAIT = 2000
+const MAX_CLOCK_SKEW = 5000
 const RECENT_INVITATION_LIMIT = 128
 
 function invitationKey (peer, id) {
@@ -12,6 +13,7 @@ function invitationKey (peer, id) {
 export function registerJingleCalls (socket, client) {
   let controller
   let address
+  let rosterPending = true
   let replayTimer
   let replayDeadline
   const pending = new Map()
@@ -23,6 +25,7 @@ export function registerJingleCalls (socket, client) {
 
   function clearReplay () {
     clearTimeout(replayTimer)
+    replayTimer = undefined
     replayDeadline = undefined
     pending.clear()
   }
@@ -56,9 +59,8 @@ export function registerJingleCalls (socket, client) {
       (controller.session?.peer === from.full && controller.session.sid === sid)
   }
 
-  function deliver ({ from, to, action, id, media, reason, receiptId, delayedAt }) {
+  function deliver ({ from, to, action, id, media, reason, receiptId, expiresAt }) {
     if (receiptId) client.xmpp.send(receiptMessage(from, receiptId)).catch(() => {})
-    const expiresAt = delayedAt === undefined ? undefined : delayedAt + RING_TIMEOUT
     controller.receiveInvitation(from, action, id, media || reason, to, expiresAt).catch(() => {})
   }
 
@@ -72,15 +74,23 @@ export function registerJingleCalls (socket, client) {
     return (suppressed.get(key) || 0) > now || (suppressed.get(invitationKey(address.bare, id)) || 0) > now
   }
 
-  function replayOfflineInvitations () {
-    const invitations = [...pending]
-    clearReplay()
-    for (const [key, invitation] of invitations) {
-      if (!isCurrent()) return
-      const now = Date.now()
-      if (isSuppressed(key, invitation.id, now) || !allowsCaller(client.parseJid(invitation.from), invitation.id)) continue
-      suppress(key, now)
-      if (invitation.delayedAt + RING_TIMEOUT > now) deliver(invitation)
+  function replayInvitations () {
+    replayTimer = undefined
+    replayDeadline = undefined
+    if (!isCurrent()) return clearReplay()
+    const now = Date.now()
+    for (const [key, invitation] of pending) {
+      if (invitation.expiresAt <= now) {
+        suppress(key, now)
+      } else if (!isSuppressed(key, invitation.id, now)) {
+        if (allowsCaller(client.parseJid(invitation.from), invitation.id)) {
+          suppress(key, now)
+          deliver(invitation)
+        } else if (rosterPending) {
+          continue
+        }
+      }
+      pending.delete(key)
     }
   }
 
@@ -90,7 +100,7 @@ export function registerJingleCalls (socket, client) {
     // messages time to arrive together without delaying an invitation indefinitely.
     if (!replayDeadline) replayDeadline = now + OFFLINE_DELIVERY_MAX_WAIT
     clearTimeout(replayTimer)
-    replayTimer = setTimeout(replayOfflineInvitations,
+    replayTimer = setTimeout(replayInvitations,
       Math.min(OFFLINE_DELIVERY_QUIET_PERIOD, Math.max(0, replayDeadline - now)))
   }
 
@@ -118,18 +128,23 @@ export function registerJingleCalls (socket, client) {
     return controller.receive(from.full, jingle)
   }, stanza => {
     if (!isCurrent()) return false
+    if (isProposalDeliveryError(stanza, address, controller.session)) {
+      controller.finish(controller.session, 'failed-application', 'Could not deliver the call invitation.', false)
+      return true
+    }
     const invitation = readInvitation(stanza, address)
     if (!invitation) return false
     const { from, to, action, id, delayedAt } = invitation
     const sender = client.parseJid(from)
     const sibling = sender.bare === address.bare
     const pendingProposal = controller.session?.proposedTo === sender.bare && controller.session.sid === id
-    if (!sibling && !pendingProposal && !allowsCaller(sender, id)) return true
+    const allowed = sibling || pendingProposal || allowsCaller(sender, id)
+    if (!allowed && !rosterPending) return true
 
     const now = Date.now()
     const key = invitationKey(from, id)
     if (delayedAt !== undefined) {
-      if (delayedAt > now) return true
+      if (delayedAt > now + MAX_CLOCK_SKEW) return true
       if (delayedAt + RING_TIMEOUT <= now) {
         if (action === 'propose') suppress(key, now)
         return true
@@ -138,8 +153,9 @@ export function registerJingleCalls (socket, client) {
     if (action === 'propose') {
       if (isSuppressed(key, id, now)) return true
       const earlier = pending.get(key)
-      if (delayedAt !== undefined) {
-        if (earlier ? delayedAt < earlier.delayedAt : pending.size < RECENT_INVITATION_LIMIT) pending.set(key, invitation)
+      if (delayedAt !== undefined || !allowed) {
+        invitation.expiresAt = Math.min(delayedAt ?? now, now) + RING_TIMEOUT
+        if (earlier ? invitation.expiresAt < earlier.expiresAt : pending.size < RECENT_INVITATION_LIMIT) pending.set(key, invitation)
       } else if (!earlier) {
         deliver(invitation)
       }
@@ -147,9 +163,14 @@ export function registerJingleCalls (socket, client) {
       if (sibling || action === 'retract' || action === 'finish') {
         suppress(sibling ? invitationKey(to, id) : key, now)
       }
-      deliver(invitation)
+      if (allowed) deliver(invitation)
     }
     if (delayedAt !== undefined) scheduleReplay(now)
     return true
   })
+
+  return function rosterSettled () {
+    rosterPending = false
+    if (!replayTimer) replayInvitations()
+  }
 }

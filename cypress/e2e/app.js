@@ -369,10 +369,14 @@ describe('XMPP Web for registered users', () => {
       const peer = `user2@${jidDomain}/Conversations`
       const toggle = () => cy.contains('#dropdown-menu label', 'Incoming call ringtone').find('input')
       toggle().should('be.checked').uncheck({ force: true })
+      cy.then(() => {
+        mockServer.beforeRosterReply = () => {
+          sendProposal(peer, 'muted-call')
+          delete mockServer.beforeRosterReply
+        }
+      })
       cy.visit('/', { onBeforeLoad })
       toggle().should('not.be.checked')
-      cy.contains('#contactsList', `user2@${jidDomain}`).should('exist')
-      cy.then(() => sendProposal(peer, 'muted-call'))
       cy.get(callPanel).should('contain', 'Incoming audio call')
       cy.get(`${callPanel} audio[loop]`).should('not.exist')
 

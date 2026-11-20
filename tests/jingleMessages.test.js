@@ -130,13 +130,13 @@ test('ignores malformed delays, archived invitations and delayed forwarded copie
   assert.equal(readInvitation(inner, BOB), null)
 })
 
-function registeredClient (t) {
+function registeredClient (t, { rosterPending = false } = {}) {
   t.mock.timers.enable({ apis: ['Date', 'setTimeout'], now: new Date('2026-11-01T10:00:00Z') })
   const client = new EventEmitter()
   const sent = []
   const states = []
   const store = {
-    contacts: [{ jid: 'alice@example.test' }],
+    contacts: rosterPending ? [] : [{ jid: 'alice@example.test' }],
     set call (value) { states.push(value) },
   }
   const socket = { client, context: { $store: store } }
@@ -146,10 +146,11 @@ function registeredClient (t) {
     return { bare: parsed.bare().toString(), full: parsed.toString(), resource: parsed.getResource() }
   }
   client.enableCalls = (receive, handleInvitation) => { client.invitation = handleInvitation }
-  registerJingleCalls(socket, client)
+  const rosterSettled = registerJingleCalls(socket, client)
   client.emit('online', BOB.full)
+  if (!rosterPending) rosterSettled()
   t.after(() => socket.calls?.reset())
-  return { client, sent, socket, states }
+  return { client, sent, socket, states, store, rosterSettled }
 }
 
 function offlineProposal (id, age = 0, attrs) {
@@ -206,12 +207,82 @@ test('reconciles delayed and live terminal actions on either side of buffered pr
 test('ignores stale, future, unauthorized and still-buffered invitations that expire', t => {
   const { client, sent, states } = registeredClient(t)
   client.invitation(offlineProposal('already-expired', RING_TIMEOUT))
-  client.invitation(offlineProposal('future', -1))
+  client.invitation(offlineProposal('future', -5001))
   client.invitation(offlineProposal('expires-in-queue', RING_TIMEOUT - 250))
   client.invitation(offlineProposal('unrecognized-contact', 0, { from: 'unknown@example.test/Other' }))
   t.mock.timers.tick(2000)
+  client.invitation(stanza({}, action('propose', 'expires-in-queue', xml('description', { xmlns: RTP, media: 'audio' }))))
   assert.deepEqual(states, [])
   assert.deepEqual(sent, [])
+})
+
+test('accepts a slightly fast server clock without extending the original ring window', t => {
+  const { client, states } = registeredClient(t)
+  client.invitation(offlineProposal('fast-clock', -5000))
+  t.mock.timers.tick(750)
+  assert.equal(states.at(-1).phase, 'incoming')
+  t.mock.timers.tick(RING_TIMEOUT - 751)
+  assert.equal(states.at(-1).phase, 'incoming')
+  t.mock.timers.tick(1)
+  assert.equal(states.at(-1).reason, 'timeout')
+})
+
+for (const delayed of [false, true]) {
+  test(`rechecks a ${delayed ? 'delayed' : 'live'} call after the login roster arrives`, t => {
+    const { client, sent, states, store, rosterSettled } = registeredClient(t, { rosterPending: true })
+    const message = stanza({}, proposal('audio'), xml('request', { xmlns: RECEIPTS }))
+    if (delayed) message.append(delay())
+    client.invitation(offlineProposal('stranger', 0, { from: 'other@example.test/Phone' }))
+    client.invitation(offlineProposal('expired', RING_TIMEOUT - 500))
+    client.invitation(offlineProposal('retracted'))
+    client.invitation(stanza({}, action('retract', 'retracted')))
+    client.invitation(message)
+    client.invitation(message)
+    t.mock.timers.tick(3000)
+    assert.deepEqual(states, [])
+    assert.deepEqual(sent, [])
+    store.contacts = [{ jid: 'alice@example.test' }]
+    rosterSettled()
+    assert.equal(states.length, 1)
+    assert.equal(states[0].phase, 'incoming')
+    assert.equal(sent.length, 2)
+    assert.ok(sent[0].getChild('received', RECEIPTS))
+    assert.equal(sent[1].getChild('ringing', JINGLE_MESSAGE).attrs.id, 'call-id')
+    t.mock.timers.tick(RING_TIMEOUT - 3000)
+    assert.equal(states.at(-1).reason, 'timeout')
+  })
+}
+
+test('discards queued invitations when the roster settles without authorizing the caller', t => {
+  const { client, sent, states, rosterSettled } = registeredClient(t, { rosterPending: true })
+  client.invitation(offlineProposal('unknown'))
+  rosterSettled()
+  t.mock.timers.tick(750)
+  assert.deepEqual(states, [])
+  assert.deepEqual(sent, [])
+})
+
+test('ends only the outstanding undelivered proposal on a matching message error', async t => {
+  const { client, socket, sent, states } = registeredClient(t)
+  const peer = 'alice@example.test'
+  const bounce = attrs => stanza({ type: 'error', from: peer, ...attrs },
+    xml('error', { type: 'cancel' }, xml('service-unavailable', { xmlns: 'urn:ietf:params:xml:ns:xmpp-stanzas' })))
+  await socket.calls.start(peer)
+  const { id } = sent[0].attrs
+  for (const attrs of [{ id: 'other' }, { id, from: 'other@example.test' }, { id, to: SIBLING }]) {
+    assert.equal(client.invitation(bounce(attrs)), false)
+  }
+  assert.equal(states.at(-1).phase, 'outgoing')
+  assert.equal(client.invitation(bounce({ id, from: 'example.test' })), true)
+  assert.equal(states.at(-1).phase, 'ended')
+  assert.match(states.at(-1).error, /deliver/)
+  t.mock.timers.tick(RING_TIMEOUT)
+  assert.equal(sent.length, 1)
+  await socket.calls.start(peer)
+  assert.equal(client.invitation(bounce({ id })), false)
+  client.invitation(stanza({}, action('ringing', socket.calls.session.sid)))
+  assert.equal(client.invitation(bounce({ id: sent[1].attrs.id })), false)
+  assert.equal(states.at(-1).ringing, true)
 })
 
 test('matches terminal actions to the caller resource and clears pending invites on rebind or logout', t => {

@@ -79,7 +79,7 @@ export default {
     if (!this.isAnonymous && window.RTCPeerConnection && navigator.mediaDevices?.getUserMedia) {
       const client = this.client
       const { registerJingleCalls } = await import('./registerJingleCalls')
-      if (this.client === client) registerJingleCalls(this, client)
+      if (this.client === client) client.onRosterSettled = registerJingleCalls(this, client)
     }
   },
 
@@ -177,12 +177,13 @@ export default {
 
     // get contacts (rfc6121)
     client.getRoster()
-      .then((rosterResult) => {
-        if (client !== this.client) return
-        this.context.$store.setRoster(rosterResult)
-
-        // send presence to contacts (rfc6121)
-        return client.sendPresence()
+      .then(roster => {
+        if (client === this.client) this.context.$store.setRoster(roster)
+      })
+      .finally(() => client.onRosterSettled?.())
+      .then(() => {
+        // Send presence after the roster has been installed (RFC 6121).
+        if (client === this.client) return client.sendPresence()
       })
       .catch((rosterError) => logError(rosterError, 'error', 'getRoster', rosterError.message, rosterError))
 
