@@ -88,3 +88,24 @@ test('routes calls to the account for offline and JMI contacts, with direct rout
   store.isOnline = false
   assert.equal(store.callTarget(bare, false), null)
 })
+
+test('selects JMI or a direct resource based on the requested media', () => {
+  const store = useStore(createPinia())
+  const bare = 'bob@example.org'
+  const desktop = `${bare}/Desktop`
+  store.callAccount = 'alice@example.org'
+  store.isOnline = true
+  store.contacts = [{ jid: bare }]
+  store.callResources = [
+    { bare, full: `${bare}/Tablet`, priority: 20, audio: true, video: false, jmi: false },
+    { bare, full: desktop, priority: 10, audio: true, video: true, jmi: false },
+    { bare, full: `${bare}/Phone`, priority: 0, audio: true, video: false, jmi: true },
+  ]
+
+  assert.equal(store.callTarget(bare, false), bare)
+  assert.equal(store.callTarget(bare, true), desktop)
+
+  store.callResources[2].audio = false
+  assert.equal(store.callTarget(bare, false), `${bare}/Tablet`)
+  assert.equal(store.callTarget(bare, true), desktop)
+})

@@ -41,9 +41,8 @@ export const useStore = defineStore('main', {
 
     callTarget: (state) => (jid, video) => {
       if (!state.isOnline || !state.callAccount || state.callAccount === jid) return null
-      const resources = state.callResources.filter(resource => resource.bare === jid)
-      if (resources.some(resource => resource.jmi)) return jid
-      const compatible = resources.filter(resource => resource.audio && (!video || resource.video))
+      const compatible = state.callResources.filter(resource => resource.bare === jid && resource.audio && (!video || resource.video))
+      if (compatible.some(resource => resource.jmi)) return jid
       compatible.sort((a, b) => b.priority - a.priority || a.full.localeCompare(b.full))
       if (compatible.length) return compatible[0].full
       // A phone may receive a message invitation via push without publishing presence.
