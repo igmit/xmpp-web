@@ -22,12 +22,25 @@ function address (value) {
   }
 }
 
-function liveMessage (stanza) {
+function messageEnvelope (stanza) {
   if (!stanza?.is('message', CLIENT)) return false
   const type = stanza.attrs.type || 'normal'
   return (type === 'chat' || type === 'normal') && !stanza.getChildElements().some(child =>
-    child.is('delay', DELAY) || child.is('x', 'jabber:x:delay') || child.is('forwarded', FORWARDED) ||
+    child.is('x', 'jabber:x:delay') || child.is('forwarded', FORWARDED) ||
     (child.getName() === 'result' && /^urn:xmpp:mam:[0-9]+$/.test(child.getNS())))
+}
+
+function deliveryStamp (stanza, ownJid) {
+  const [delay, extra] = stanza.getChildren('delay', DELAY)
+  if (!delay) return undefined
+  const { from, stamp } = delay.attrs
+  // XEP-0203 allows the delivering server to omit its address.
+  const server = jid(ownJid.bare).getDomain()
+  if (extra || (from !== undefined && from !== server && from !== ownJid.bare) ||
+      !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z$/.test(stamp)) return null
+  const timestamp = Date.parse(stamp)
+  if (!Number.isFinite(timestamp) || new Date(timestamp).toISOString().slice(0, 19) !== stamp.slice(0, 19)) return null
+  return timestamp
 }
 
 function idPresent (value) {
@@ -40,7 +53,10 @@ export function readReason (reason) {
 }
 
 export function readInvitation (stanza, ownJid) {
-  if (!ownJid?.bare || !ownJid.full || !liveMessage(stanza) || stanza.parent?.is('forwarded', FORWARDED)) return null
+  if (!ownJid?.bare || !ownJid.full || !messageEnvelope(stanza) || stanza.parent?.is('forwarded', FORWARDED)) return null
+
+  const delayedAt = deliveryStamp(stanza, ownJid)
+  if (delayedAt === null) return null
 
   let message = stanza
   const carbons = stanza.getChildElements().filter(child => child.is('sent', CARBONS) || child.is('received', CARBONS))
@@ -51,7 +67,7 @@ export function readInvitation (stanza, ownJid) {
     const [forwarded, extra] = carbon.getChildElements()
     if (extra || !forwarded?.is('forwarded', FORWARDED)) return null
     const [original, extraForwardedChild] = forwarded.getChildElements()
-    if (extraForwardedChild || !liveMessage(original)) return null
+    if (extraForwardedChild || !messageEnvelope(original) || original.getChild('delay', DELAY)) return null
     message = original
   }
 
@@ -68,6 +84,7 @@ export function readInvitation (stanza, ownJid) {
   const ownTarget = to === ownJid.bare || to === ownJid.full
   const ownSender = sender.bare().toString() === ownJid.bare
   const sentCarbon = carbon?.is('sent', CARBONS)
+  if (delayedAt !== undefined && carbon && !(sentCarbon && ownSender && (action === 'proceed' || action === 'reject'))) return null
   if (ownSender) {
     if (from === ownJid.full || !SIBLING_ACTIONS.includes(action)) return null
     const legacyCopy = to === ownJid.bare && action !== 'proceed'
@@ -87,7 +104,7 @@ export function readInvitation (stanza, ownJid) {
   const reason = readReason(payload.getChild('reason', JINGLE))
   const requestsReceipt = !carbon && !ownSender && message.getChild('request', RECEIPTS) && !message.getChild('received', RECEIPTS)
   const receiptId = requestsReceipt && idPresent(message.attrs.id) ? message.attrs.id : undefined
-  return { from, to, action, id, media, reason, receiptId }
+  return { from, to, action, id, media, reason, receiptId, ...(delayedAt !== undefined && { delayedAt }) }
 }
 
 export function invitationMessage (to, action, id, { reason, media = [], tieBreak } = {}) {

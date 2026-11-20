@@ -786,6 +786,31 @@ test('suppresses an authenticated sibling answer for the current invitation', as
   assert.deepEqual(captureRequests, [])
 })
 
+test('uses the original ring deadline for a replayed proposal and gives an accepted proposal time to connect', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout', 'Date'], now: 1000 })
+  const bob = setup(BOB)
+  t.after(() => bob.controller.reset())
+
+  await bob.controller.receiveInvitation(ALICE, 'propose', 'ring-deadline', ['audio'], BOB, 1000)
+  assert.deepEqual(bob.states, [])
+  assert.deepEqual(bob.invitations, [])
+
+  await bob.controller.receiveInvitation(ALICE, 'propose', 'ring-deadline', ['audio'], BOB, 1100)
+  t.mock.timers.tick(99)
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+  t.mock.timers.tick(1)
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.equal(bob.states.at(-1).reason, 'timeout')
+
+  await bob.controller.receiveInvitation(ALICE, 'propose', 'connecting-deadline', ['audio'], BOB, 1200)
+  await bob.controller.accept()
+  t.mock.timers.tick(100)
+  assert.equal(bob.states.at(-1).phase, 'connecting')
+  t.mock.timers.tick(34900)
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.equal(bob.states.at(-1).reason, 'timeout')
+})
+
 test('times out an invitation that never gets a matching IQ and remembers its ID across reset', async t => {
   t.mock.timers.enable({ apis: ['setTimeout'] })
   const bob = setup(BOB)

@@ -146,16 +146,18 @@ describe('XMPP Web for registered users', () => {
     const receipts = 'urn:xmpp:receipts'
     const rtp = 'urn:xmpp:jingle:apps:rtp:1'
 
-    function sendProposal (peer, sid) {
+    function sendProposal (peer, sid, stamp) {
       mockServer.emit('message', `<message from="${peer}" to="${jidLocal}@${jidDomain}" type="chat" id="proposal-${sid}" xmlns="jabber:client">
         <propose xmlns="${jmi}" id="${sid}"><description xmlns="${rtp}" media="audio"/></propose>
+        ${stamp ? `<delay xmlns="urn:xmpp:delay" from="${jidDomain}" stamp="${stamp}"/>` : ''}
         <request xmlns="${receipts}"/><store xmlns="urn:xmpp:hints"/>
       </message>`)
     }
 
-    function sendRetract (peer, sid) {
+    function sendRetract (peer, sid, stamp) {
       mockServer.emit('message', `<message from="${peer}" to="${jidLocal}@${jidDomain}" type="chat" xmlns="jabber:client">
         <retract xmlns="${jmi}" id="${sid}"/><store xmlns="urn:xmpp:hints"/>
+        ${stamp ? `<delay xmlns="urn:xmpp:delay" from="${jidDomain}" stamp="${stamp}"/>` : ''}
       </message>`)
     }
 
@@ -322,6 +324,27 @@ describe('XMPP Web for registered users', () => {
       cy.get(callPanel).should('contain', 'Call ended')
         .find('[role="alert"]').should('contain', 'microphone')
       cy.contains(`${callPanel} button`, 'Accept').should('not.exist')
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+    })
+
+    it('rings only the outstanding invitation from an offline delivery batch', () => {
+      const peer = `user2@${jidDomain}/Conversations`
+      cy.window().then(win => {
+        cy.stub(win.HTMLMediaElement.prototype, 'play').resolves().as('ringtone')
+        const stamp = new Date().toISOString()
+        sendProposal(peer, 'offline-canceled', stamp)
+        sendRetract(peer, 'offline-canceled', stamp)
+        sendProposal(peer, 'offline-outstanding', stamp)
+      })
+      expectCallMessage(peer, jmi, 'ringing', 'offline-outstanding')
+      cy.get(callPanel).should('contain', 'Incoming audio call')
+      cy.get('@ringtone').should('have.been.calledOnce')
+      cy.then(() => {
+        const rangCanceledCall = mockServer.receivedStanzas.some(stanza =>
+          stanza.includes('<ringing ') && stanza.includes('id="offline-canceled"'))
+        expect(rangCanceledCall).to.equal(false)
+      })
+      cy.contains(`${callPanel} button`, 'Decline').click()
       cy.contains(`${callPanel} button`, 'Dismiss').click()
     })
 

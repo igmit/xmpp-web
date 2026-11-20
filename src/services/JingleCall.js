@@ -5,7 +5,7 @@ import { descriptionToJingle, jingleToDescription, rejectedContents, transportCa
 import { readReason } from './jingleMessages.js'
 import { JINGLE, RTP, RTP_INFO } from './jingleNamespaces.js'
 
-const RING_TIMEOUT = 60000
+export const RING_TIMEOUT = 60000
 const CONNECTION_TIMEOUT = 35000
 const RECOVERY_TIMEOUT = 10000
 const SIGNALING_TIMEOUT = 30000
@@ -137,11 +137,14 @@ export class JingleCall {
     if (phase === 'outgoing' && session.proceeded) {
       session.phaseTimer = setTimeout(() => this.finish(session, 'connectivity-error', CONNECTION_ERROR), CONNECTION_TIMEOUT)
     } else if (phase === 'incoming' || phase === 'outgoing') {
+      const timeout = phase === 'incoming' && session.expiresAt !== undefined
+        ? Math.max(0, session.expiresAt - Date.now())
+        : RING_TIMEOUT
       session.phaseTimer = setTimeout(() => {
         const error = phase === 'incoming' ? 'The incoming call timed out.' :
           session.signalled || session.proposedTo ? 'The other contact did not answer.' : 'Call setup timed out.'
         this.finish(session, 'timeout', error)
-      }, RING_TIMEOUT)
+      }, timeout)
     } else if (phase === 'connecting') {
       session.phaseTimer = setTimeout(() => {
         if (session.invitation && !session.signalled) {
@@ -507,7 +510,7 @@ export class JingleCall {
     }
   }
 
-  async receiveInvitation (address, action, sid, mediaOrReason, target) {
+  async receiveInvitation (address, action, sid, mediaOrReason, target, expiresAt) {
     const from = fullJid(address)
     if (!this.sendInvitation || !this.ownJid || !from || !validSid(sid)) return
 
@@ -528,6 +531,7 @@ export class JingleCall {
     }
 
     if (action === 'propose') {
+      if (expiresAt !== undefined && expiresAt <= Date.now()) return
       if (!supportedMedia(mediaOrReason) || this.recentInvitations.has(sid) ||
           (current?.invitation && !current.proposedTo && current.sid === sid)) return
       this.rememberInvitation(sid)
@@ -541,7 +545,7 @@ export class JingleCall {
       } else if (current) {
         return this.signalInvitation(peer, 'reject', sid, { reason: 'busy' })
       }
-      const session = this.createSession(sid, peer, mediaOrReason.includes('video'), 'incoming', { invitation: true })
+      const session = this.createSession(sid, peer, mediaOrReason.includes('video'), 'incoming', { invitation: true, expiresAt })
       if (this.session === session && session.phase === 'incoming') return this.signalInvitation(peer, 'ringing', sid)
     } else if (current?.proposedTo === bare && current.sid === sid && (!current.proceeded || action === 'proceed')) {
       return this.receiveProposalResponse(current, peer, action, mediaOrReason)
