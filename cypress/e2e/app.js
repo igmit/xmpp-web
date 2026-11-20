@@ -371,6 +371,7 @@ describe('XMPP Web for registered users', () => {
       toggle().should('be.checked').uncheck({ force: true })
       cy.visit('/', { onBeforeLoad })
       toggle().should('not.be.checked')
+      cy.contains('#contactsList', `user2@${jidDomain}`).should('exist')
       cy.then(() => sendProposal(peer, 'muted-call'))
       cy.get(callPanel).should('contain', 'Incoming audio call')
       cy.get(`${callPanel} audio[loop]`).should('not.exist')
