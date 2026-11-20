@@ -12,6 +12,7 @@ const SIGNALING_TIMEOUT = 30000
 const SIGNALING_ERROR = 'The call ended because the XMPP connection was lost.'
 const RECENT_INVITATION_LIMIT = 128
 const CONNECTION_ERROR = 'Could not connect the call. The networks may require a TURN relay.'
+const ANSWERED_ELSEWHERE = 'The call was answered on another device.'
 const REMOTE_END_MESSAGES = {
   busy: 'The other contact is busy.',
   cancel: 'The caller canceled the call.',
@@ -519,7 +520,7 @@ export class JingleCall {
       const legacyCopy = target === ownBare && (action === 'accept' || action === 'reject')
       if (!legacyCopy && fullJid(target)?.toString() !== current.peer) return
       if (action === 'accept' || action === 'proceed') {
-        this.finish(current, 'success', 'The call was answered on another device.', false)
+        this.finish(current, 'success', ANSWERED_ELSEWHERE, false)
       } else if (action === 'reject') {
         this.finish(current, 'decline', 'The call was declined on another device.', false)
       }
@@ -542,9 +543,15 @@ export class JingleCall {
       }
       const session = this.createSession(sid, peer, mediaOrReason.includes('video'), 'incoming', { invitation: true })
       if (this.session === session && session.phase === 'incoming') return this.signalInvitation(peer, 'ringing', sid)
-    } else if (current?.proposedTo === bare && current.sid === sid && !current.proceeded) {
+    } else if (current?.proposedTo === bare && current.sid === sid && (!current.proceeded || action === 'proceed')) {
       return this.receiveProposalResponse(current, peer, action, mediaOrReason)
     } else if (current?.invitation && current.peer === peer && current.sid === sid) {
+      if (action === 'finish' && mediaOrReason === 'alternative-session') {
+        if (target !== this.ownJid.toString()) return
+        if (!current.proposedTo && !current.signalled) {
+          return this.finish(current, 'success', ANSWERED_ELSEWHERE, false)
+        }
+      }
       if (action === 'finish' || (action === 'retract' && current.phase !== 'active')) {
         const reason = typeof mediaOrReason === 'string' && Object.hasOwn(REMOTE_END_MESSAGES, mediaOrReason) ? mediaOrReason :
           action === 'retract' ? 'cancel' : 'success'
@@ -561,6 +568,12 @@ export class JingleCall {
       const condition = Object.hasOwn(REMOTE_END_MESSAGES, reason) && reason !== 'success' ? reason : 'decline'
       return this.finish(session, condition, REMOTE_END_MESSAGES[condition], false)
     } else if (action === 'proceed') {
+      if (session.proceeded) {
+        if (peer !== session.peer) {
+          return this.signalInvitation(peer, 'finish', session.sid, { reason: 'alternative-session' })
+        }
+        return
+      }
       // Lock the resource before any asynchronous work. Another device may also answer.
       session.peer = peer
       session.proceeded = true
