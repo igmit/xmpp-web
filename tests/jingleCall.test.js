@@ -36,7 +36,7 @@ function setup (ownJid, options = {}) {
   const controller = new JingleCall({
     ownJid,
     send: async (peer, stanza) => sent.push({ peer, stanza }),
-    sendInvitation: async (peer, action, sid, reason) => invitations.push({ peer, action, sid, reason }),
+    sendInvitation: async (peer, action, sid, { reason, ...details } = {}) => invitations.push({ peer, action, sid, reason, ...details }),
     onChange: state => states.push(state),
     ...options,
   })
@@ -573,6 +573,101 @@ test('accepts a same-peer invitation while the local outgoing offer is unsent', 
   await setImmediate()
   assert.ok(track.stopped)
   assert.ok(!alice.sent.some(({ stanza }) => stanza.attrs.action === 'session-initiate'))
+})
+
+test('rings two devices and starts a Jingle session only with the first device that proceeds', async t => {
+  const alice = setup(ALICE)
+  const phone = setup(BOB)
+  const tabletJid = 'bob@example.org/Tablet'
+  const tablet = setup(tabletJid)
+  t.after(() => [alice, phone, tablet].forEach(call => call.controller.reset()))
+
+  await alice.controller.start('bob@example.org', true)
+  const [proposal] = alice.invitations
+  const { sid } = proposal
+  assert.deepEqual(proposal, { peer: 'bob@example.org', action: 'propose', sid, reason: undefined, media: ['audio', 'video'] })
+  assert.deepEqual(captureRequests, [])
+  assert.deepEqual(alice.sent, [])
+  await phone.controller.receiveInvitation(ALICE, 'propose', sid, proposal.media, proposal.peer)
+  await tablet.controller.receiveInvitation(ALICE, 'propose', sid, proposal.media, proposal.peer)
+  assert.equal(phone.states.at(-1).phase, 'incoming')
+  assert.equal(tablet.states.at(-1).phase, 'incoming')
+  await alice.controller.receiveInvitation(BOB, 'ringing', sid)
+  assert.equal(alice.states.at(-1).ringing, true)
+
+  await alice.controller.receiveInvitation('mallory@example.org/Phone', 'proceed', sid)
+  await alice.controller.receiveInvitation(BOB, 'proceed', 'another-session')
+  assert.deepEqual(captureRequests, [])
+
+  await phone.controller.accept()
+  assert.equal(phone.invitations.at(-1).action, 'proceed')
+  const proceeding = alice.controller.receiveInvitation(BOB, 'proceed', sid)
+  await alice.controller.receiveInvitation(tabletJid, 'proceed', sid)
+  await alice.controller.receiveInvitation(BOB, 'proceed', sid)
+  await proceeding
+  await tablet.controller.receiveInvitation(BOB, 'proceed', sid, undefined, ALICE)
+  assert.equal(tablet.states.at(-1).phase, 'ended')
+  assert.match(tablet.states.at(-1).error, /answered on another device/)
+  assert.deepEqual(captureRequests, [{ audio: true, video: true }])
+  assert.equal(alice.states.at(-1).ringing, false)
+  const [{ peer, stanza }] = alice.sent
+  assert.equal(alice.sent.length, 1)
+  assert.equal(peer, BOB)
+  assert.equal(stanza.attrs.sid, sid)
+  assert.equal(stanza.attrs.action, 'session-initiate')
+
+  await assert.rejects(alice.controller.receive(tabletJid, request('session-accept', sid)), { condition: 'item-not-found' })
+  await alice.controller.receiveInvitation(tabletJid, 'finish', sid, 'success')
+  assert.equal(alice.states.at(-1).phase, 'outgoing')
+  await phone.controller.receive(ALICE, stanza)
+  await setTimeout(5)
+  assert.equal(phone.sent[0].stanza.attrs.action, 'session-accept')
+  await alice.controller.receive(BOB, phone.sent[0].stanza)
+  FakePeer.instances.forEach(pc => pc.connect())
+  assert.equal(alice.states.at(-1).phase, 'active')
+  assert.equal(phone.states.at(-1).phase, 'active')
+  await alice.controller.end()
+  assert.deepEqual(alice.invitations.at(-1), { peer: BOB, action: 'finish', sid, reason: 'success' })
+})
+
+test('retracts a canceled or unanswered proposal and ignores a late proceed', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  const bare = 'bob@example.org'
+  await alice.controller.start(bare)
+  const sid = alice.invitations.at(-1).sid
+  await alice.controller.end()
+  assert.deepEqual(alice.invitations.at(-1), { peer: bare, action: 'retract', sid, reason: 'cancel' })
+  await alice.controller.receiveInvitation(BOB, 'proceed', sid)
+  assert.deepEqual(captureRequests, [])
+  assert.deepEqual(alice.sent, [])
+
+  await alice.controller.start(bare)
+  const timedOut = alice.invitations.at(-1).sid
+  t.mock.timers.tick(60000)
+  assert.deepEqual(alice.invitations.at(-1), { peer: bare, action: 'retract', sid: timedOut, reason: 'expired' })
+  assert.match(alice.states.at(-1).error, /did not answer/)
+})
+
+test('ends a rejected proposal without capturing media and breaks competing proposals by session ID', async t => {
+  const alice = setup(ALICE)
+  t.after(() => alice.controller.reset())
+  const bare = 'bob@example.org'
+  await alice.controller.start(bare)
+  const rejected = alice.invitations.at(-1).sid
+  await alice.controller.receiveInvitation(BOB, 'reject', rejected, 'busy')
+  assert.equal(alice.states.at(-1).reason, 'busy')
+  assert.deepEqual(captureRequests, [])
+
+  await alice.controller.start(bare)
+  const outgoing = alice.invitations.at(-1).sid
+  await alice.controller.receiveInvitation(BOB, 'propose', 'z', ['audio'])
+  assert.deepEqual(alice.invitations.at(-1), { peer: BOB, action: 'reject', sid: 'z', reason: 'expired', tieBreak: true })
+  await alice.controller.receiveInvitation(BOB, 'propose', '0', ['audio'])
+  assert.deepEqual(alice.invitations.at(-2), { peer: bare, action: 'retract', sid: outgoing, reason: 'expired', tieBreak: true })
+  assert.equal(alice.invitations.at(-1).action, 'ringing')
+  assert.equal(alice.states.at(-1).phase, 'incoming')
 })
 
 test('answers a message invitation only after consent and a matching Jingle offer', async t => {

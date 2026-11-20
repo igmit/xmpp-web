@@ -1,6 +1,6 @@
 import { XmppClient as XMPP, NS } from './XmppClient'
 import defaultAvatar from '../assets/defaultAvatar'
-import { JINGLE, RTP, AUDIO, VIDEO, ICE, DTLS } from './jingleNamespaces.js'
+import { JINGLE, JINGLE_MESSAGE, RTP, AUDIO, VIDEO, ICE, DTLS } from './jingleNamespaces.js'
 
 const transports = window.config.transports
 const resource = window.config.resource
@@ -151,10 +151,13 @@ export default {
     }
 
     const client = this.client
+    const enableCarbons = () => client.enableCarbons()
+      .catch(error => logError(error, 'error', 'carbon', error.message, error))
     this.client.on('online', (jid) => {
       if (client !== this.client) return
       this.fullJid = client.parseJid(jid)
       client.jid = this.fullJid
+      enableCarbons()
       client.sendPresence().catch(error => logError(error, 'error', 'presence after reconnect'))
       console.info('XMPP online')
       this.context.$store.setOnline(true)
@@ -187,8 +190,7 @@ export default {
       .catch((discoInfoError) => logError(discoInfoError, 'error', 'getDiscoInfo', discoInfoError.message, discoInfoError))
 
     // enable carbons (XEP-0280: Message Carbons)
-    this.client.enableCarbons()
-      .catch((error) => logError(error, 'error', 'carbon', error.message, error))
+    enableCarbons()
 
     // get bookmarked rooms (XEP-0048: Bookmarks)
     client.getBookmarks()
@@ -389,21 +391,31 @@ export default {
     }
     // A resource can disappear or change capabilities while its disco request is in flight.
     // Only its own entry is updated when the reply arrives.
-    const resource = { bare: from.bare, full: from.full, priority, capsVersion, audio: false, video: false }
+    const resource = { bare: from.bare, full: from.full, priority, capsVersion, audio: false, video: false, jmi: false }
     store.callResources = [...store.callResources.filter(item => item !== existing), resource]
     const entry = store.callResources.find(item => item.full === from.full)
     try {
       const { features } = await this.client.getDiscoInfo(from.full, false)
       entry.audio = [JINGLE, RTP, ICE, DTLS, AUDIO].every(feature => features.includes(feature))
       entry.video = entry.audio && features.includes(VIDEO)
+      entry.jmi = features.includes(JINGLE_MESSAGE)
     } catch {
       store.callResources = store.callResources.filter(item => item !== entry)
     }
   },
 
   startCall (jid, video) {
-    const peer = this.context.$store.callTarget(jid, video)
-    if (peer && this.calls) return this.calls.start(peer, video)
+    const store = this.context.$store
+    const peer = store.callTarget(jid, video)
+    if (!peer || !this.calls) return
+    if (peer === jid) {
+      const subscription = store.contacts.find(contact => contact.jid === jid)?.subscription
+      if (subscription !== 'both' && subscription !== 'from') {
+        this.client.sendPresence(undefined, undefined, jid)
+          .catch(error => logError(error, 'error', 'directed presence for call'))
+      }
+    }
+    return this.calls.start(peer, video)
   },
 
   acceptCall () {

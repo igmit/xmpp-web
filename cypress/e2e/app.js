@@ -172,9 +172,43 @@ describe('XMPP Web for registered users', () => {
       })
     }
 
-    it('shows call controls when a contact has a callable resource', () => {
-      cy.get(audioCall).should('not.exist')
-      cy.get(videoCall).should('not.exist')
+    it('proposes a video call to the account with no online resource and waits for proceed', () => {
+      const bare = `user2@${jidDomain}`
+      const phone = `${bare}/Conversations`
+      let sid
+      cy.window().then(win => {
+        cy.stub(win.navigator.mediaDevices, 'getUserMedia')
+          .rejects(new win.DOMException('Permission denied', 'NotAllowedError')).as('capture')
+      })
+      cy.get(videoCall).click()
+      cy.get(callPanel).should('contain', 'Starting video call')
+      cy.wrap(mockServer.receivedStanzas, { log: false }).should(stanzas => {
+        const sent = stanzas.find(value => value.startsWith('<message ') && value.includes('<propose '))
+        expect(sent, 'outgoing proposal').to.be.a('string')
+        const message = new DOMParser().parseFromString(sent, 'application/xml').documentElement
+        const proposal = message.getElementsByTagNameNS(jmi, 'propose')[0]
+        expect(message.getAttribute('to')).to.equal(bare)
+        expect([...proposal.getElementsByTagNameNS(rtp, 'description')].map(item => item.getAttribute('media')))
+          .to.deep.equal(['audio', 'video'])
+        sid = proposal.getAttribute('id')
+      })
+      cy.get('@capture').should('not.have.been.called')
+      const respond = action => cy.then(() => {
+        mockServer.emit('message', `<message from="${phone}" to="${jidLocal}@${jidDomain}" type="chat" xmlns="jabber:client">
+          <${action} xmlns="${jmi}" id="${sid}"/>
+        </message>`)
+      })
+      respond('ringing')
+      cy.get(callPanel).should('contain', 'Ringing video call')
+      cy.get('@capture').should('not.have.been.called')
+      respond('proceed')
+      cy.get('@capture').should('have.been.calledOnce')
+      cy.get(callPanel).should('contain', 'Call ended')
+      cy.then(() => expectCallMessage(phone, jmi, 'finish', sid))
+      cy.contains(`${callPanel} button`, 'Dismiss').click()
+    })
+
+    it('shows call controls when a contact has a legacy callable resource', () => {
       cy.then(() => {
         mockServer.emit('message', `<presence from="user2@${jidDomain}/callClient" xmlns="jabber:client"/>`)
       })
@@ -238,17 +272,18 @@ describe('XMPP Web for registered users', () => {
       cy.get(videoCall).should('be.enabled')
     })
 
-    it('keeps audio available while another capable device is online', () => {
+    it('keeps call controls available after the last resource goes offline', () => {
       cy.then(() => {
         mockServer.emit('message', `<presence from="user2@${jidDomain}/audioClient" xmlns="jabber:client"/>`)
         mockServer.emit('message', `<presence from="user2@${jidDomain}/callClient" type="unavailable" xmlns="jabber:client"/>`)
       })
-      cy.get(videoCall).should('not.exist')
+      cy.get(videoCall).should('be.enabled')
       cy.get(audioCall).should('be.enabled')
       cy.then(() => {
         mockServer.emit('message', `<presence from="user2@${jidDomain}/audioClient" type="unavailable" xmlns="jabber:client"/>`)
       })
-      cy.get(audioCall).should('not.exist')
+      cy.get(audioCall).should('be.enabled')
+      cy.get(videoCall).should('be.enabled')
     })
 
     it('answers a Conversations proposal without prompting again on session-initiate', () => {

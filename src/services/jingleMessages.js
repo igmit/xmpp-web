@@ -9,7 +9,7 @@ const FORWARDED = 'urn:xmpp:forward:0'
 const DELAY = 'urn:xmpp:delay'
 const RECEIPTS = 'urn:xmpp:receipts'
 const HINTS = 'urn:xmpp:hints'
-const REMOTE_ACTIONS = ['propose', 'retract', 'finish']
+const REMOTE_ACTIONS = ['propose', 'retract', 'finish', 'ringing', 'proceed', 'reject']
 const SIBLING_ACTIONS = ['accept', 'proceed', 'reject']
 
 function address (value) {
@@ -90,10 +90,11 @@ export function readInvitation (stanza, ownJid) {
   return { from, to, action, id, media, reason, receiptId }
 }
 
-export function invitationMessage (to, action, id, reason) {
+export function invitationMessage (to, action, id, { reason, media = [], tieBreak } = {}) {
   const condition = reason ? xml('reason', { xmlns: JINGLE }, xml(reason)) : null
+  const descriptions = media.map(kind => xml('description', { xmlns: RTP, media: kind }))
   return xml('message', { to, type: 'chat', id: nanoid() },
-    xml(action, { xmlns: JINGLE_MESSAGE, id }, condition),
+    xml(action, { xmlns: JINGLE_MESSAGE, id }, descriptions, condition, tieBreak && xml('tie-break')),
     xml('store', { xmlns: HINTS }))
 }
 

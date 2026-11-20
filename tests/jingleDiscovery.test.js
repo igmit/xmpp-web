@@ -2,8 +2,10 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import test from 'node:test'
 import { xml } from '@xmpp/client'
+import { createPinia } from 'pinia'
 import { callCapabilities, iceServersFromServices } from '../src/services/jingleDiscovery.js'
 import { EXTDISCO } from '../src/services/jingleNamespaces.js'
+import { useStore } from '../src/store/index.js'
 
 test('publishes an entity capabilities hash matching the discoverable feature set', async () => {
   const chatFeatures = ['http://jabber.org/protocol/chatstates', 'urn:xmpp:reactions:0']
@@ -60,4 +62,29 @@ test('requests credentials for restricted TURN services and keeps working server
     { urls: 'turns:relay.example.org:5349?transport=tcp', username: 'temporary', credential: 'temporary-pass' },
     { urls: 'turn:inline.example.org', username: 'inline', credential: 'inline-pass' },
   ])
+})
+
+test('routes calls to the account for offline and JMI contacts, with direct routing for legacy media', () => {
+  const store = useStore(createPinia())
+  const ownAccount = 'alice@example.org'
+  const bare = 'bob@example.org'
+  const legacy = `${bare}/Legacy`
+  store.contacts = [{ jid: bare }, { jid: ownAccount }]
+  store.isOnline = true
+  assert.equal(store.callTarget(bare, false), null)
+
+  store.callAccount = ownAccount
+  assert.equal(store.callTarget(ownAccount, false), null)
+  assert.equal(store.callTarget('stranger@example.org', false), null)
+  assert.equal(store.callTarget(bare, false), bare)
+  assert.equal(store.callTarget(bare, true), bare)
+
+  store.callResources = [{ bare, full: legacy, priority: 10, audio: true, video: false, jmi: false }]
+  assert.equal(store.callTarget(bare, false), legacy)
+  assert.equal(store.callTarget(bare, true), bare)
+  store.callResources.push({ bare, full: `${bare}/Phone`, priority: 0, audio: true, video: true, jmi: true })
+  assert.equal(store.callTarget(bare, false), bare)
+  assert.equal(store.callTarget(bare, true), bare)
+  store.isOnline = false
+  assert.equal(store.callTarget(bare, false), null)
 })

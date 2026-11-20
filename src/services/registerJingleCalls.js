@@ -14,12 +14,13 @@ export function registerJingleCalls (socket, client) {
       controller = new JingleCall({
         ownJid: address.full,
         send: (peer, jingle) => client.sendJingle(peer, jingle),
-        sendInvitation: (peer, action, sid, reason) => client.xmpp.send(invitationMessage(peer, action, sid, reason)),
+        sendInvitation: (peer, action, sid, details) => client.xmpp.send(invitationMessage(peer, action, sid, details)),
         onChange: call => { socket.context.$store.call = call },
         iceServers: () => client.getIceServers(),
       })
     }
     socket.calls = controller
+    socket.context.$store.callAccount = address.bare
     controller.signalingRestored()
   }
 
@@ -58,7 +59,8 @@ export function registerJingleCalls (socket, client) {
     if (!invitation) return false
     const { from, to, action, id, media, reason, receiptId } = invitation
     const sender = client.parseJid(from)
-    if (sender.bare === address.bare || allowsCaller(sender, id)) {
+    const pendingProposal = controller.session?.proposedTo === sender.bare && controller.session.sid === id
+    if (sender.bare === address.bare || pendingProposal || allowsCaller(sender, id)) {
       if (receiptId) client.xmpp.send(receiptMessage(sender.full, receiptId)).catch(() => {})
       controller.receiveInvitation(sender.full, action, id, media || reason, to).catch(() => {})
     }

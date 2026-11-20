@@ -9,6 +9,7 @@ const getDefaultState = () => {
   return {
     activeChat: null,
     call: null,
+    callAccount: null,
     callResources: [],
     messages: [],
     reactions: [],
@@ -39,11 +40,14 @@ export const useStore = defineStore('main', {
   getters: {
 
     callTarget: (state) => (jid, video) => {
-      if (!state.isOnline) return null
-      const resources = state.callResources.filter(resource =>
-        resource.bare === jid && resource.audio && (!video || resource.video))
-      resources.sort((a, b) => b.priority - a.priority || a.full.localeCompare(b.full))
-      return resources[0]?.full || null
+      if (!state.isOnline || !state.callAccount || state.callAccount === jid) return null
+      const resources = state.callResources.filter(resource => resource.bare === jid)
+      if (resources.some(resource => resource.jmi)) return jid
+      const compatible = resources.filter(resource => resource.audio && (!video || resource.video))
+      compatible.sort((a, b) => b.priority - a.priority || a.full.localeCompare(b.full))
+      if (compatible.length) return compatible[0].full
+      // A phone may receive a message invitation via push without publishing presence.
+      return state.contacts.some(contact => contact.jid === jid) ? jid : null
     },
 
     canCall () {

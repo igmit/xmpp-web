@@ -49,7 +49,7 @@ export default {
       const type = this.call.video ? 'video' : 'audio'
       switch (this.call.phase) {
         case 'incoming': return `Incoming ${type} call`
-        case 'outgoing': return `Starting ${type} call…`
+        case 'outgoing': return this.call.ringing ? `Ringing ${type} call…` : `Starting ${type} call…`
         case 'connecting': return `Connecting ${type} call…`
         case 'active': return this.call.video ? 'Video call in progress' : 'Audio call in progress'
         default: return 'Call ended'

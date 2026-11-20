@@ -57,7 +57,7 @@ test('ignores malformed invitations, unexpected routing, and unsupported media',
     stanza({}, action('retract', ' ')),
     stanza({}, action('retract', undefined)),
     stanza({}, action('retract', 'call-id'), proposal('audio')),
-    stanza({}, action('reject', 'call-id')),
+    stanza({ to: SIBLING }, action('reject', 'call-id')),
   ]
   malformed.forEach(message => assert.equal(readInvitation(message, BOB), null, message.toString()))
   assert.equal(readInvitation(stanza({ id: undefined }, proposal('audio'), xml('request', { xmlns: RECEIPTS })), BOB).receiptId, undefined)
@@ -100,7 +100,7 @@ test('ignores delayed and archived invitations, including forwarded copies', () 
 
 test('creates separate chat stanza IDs for JMI responses and receipts', () => {
   const proceed = invitationMessage(ALICE, 'proceed', 'call-id')
-  const reject = invitationMessage(ALICE, 'reject', 'call-id', 'busy')
+  const reject = invitationMessage(ALICE, 'reject', 'call-id', { reason: 'busy' })
   const receipt = receiptMessage(ALICE, 'message-id')
   for (const message of [proceed, reject, receipt]) {
     assert.equal(message.attrs.to, ALICE)

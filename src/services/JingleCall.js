@@ -44,14 +44,19 @@ function microphoneStatus (track) {
   return track.muted ? 'muted' : null
 }
 
-function fullJid (address) {
+function callJid (address) {
   if (typeof address !== 'string') return null
   try {
     const parsed = jid(address)
-    return parsed.getLocal() && parsed.getResource() ? parsed : null
+    return parsed.getLocal() ? parsed : null
   } catch {
     return null
   }
+}
+
+function fullJid (address) {
+  const parsed = callJid(address)
+  return parsed?.getResource() ? parsed : null
 }
 
 function validSid (sid) {
@@ -128,10 +133,12 @@ export class JingleCall {
   schedulePhaseTimeout (session) {
     clearTimeout(session.phaseTimer)
     const { phase } = session
-    if (phase === 'incoming' || phase === 'outgoing') {
+    if (phase === 'outgoing' && session.proceeded) {
+      session.phaseTimer = setTimeout(() => this.finish(session, 'connectivity-error', CONNECTION_ERROR), CONNECTION_TIMEOUT)
+    } else if (phase === 'incoming' || phase === 'outgoing') {
       session.phaseTimer = setTimeout(() => {
         const error = phase === 'incoming' ? 'The incoming call timed out.' :
-          session.signalled ? 'The other contact did not answer.' : 'Call setup timed out.'
+          session.signalled || session.proposedTo ? 'The other contact did not answer.' : 'Call setup timed out.'
         this.finish(session, 'timeout', error)
       }, RING_TIMEOUT)
     } else if (phase === 'connecting') {
@@ -146,9 +153,9 @@ export class JingleCall {
   }
 
   publish (session, ended) {
-    const { phase, peer, video, localStream, remoteStream } = session
+    const { phase, peer, video, localStream, remoteStream, ringing } = session
     const { microphoneStatus, microphoneError } = session
-    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneStatus, microphoneError, ...ended })
+    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneStatus, microphoneError, ringing, ...ended })
   }
 
   async sendAction (session, action, children) {
@@ -166,9 +173,9 @@ export class JingleCall {
     }
   }
 
-  async signalInvitation (peer, action, sid, reason) {
+  async signalInvitation (peer, action, sid, details) {
     try {
-      await this.sendInvitation(peer, action, sid, reason)
+      await this.sendInvitation(peer, action, sid, details)
     } catch {
       // The invitation can still be handled locally if a status message is lost.
     }
@@ -218,10 +225,11 @@ export class JingleCall {
     const pending = []
     if (notifyPeer && session.signalled) pending.push(this.signalTermination(session, reason))
     if (notifyPeer && session.invitation) {
-      const action = session.proceeded ? 'finish' : 'reject'
+      const action = session.proceeded ? 'finish' : session.proposedTo ? 'retract' : 'reject'
       const condition = reason === 'success' || reason === 'connectivity-error' ? reason :
-        reason === 'decline' && action === 'reject' ? 'busy' : 'expired'
-      pending.push(this.signalInvitation(session.peer, action, session.sid, condition))
+        reason === 'decline' && action === 'reject' ? 'busy' :
+          reason === 'cancel' && action === 'retract' ? 'cancel' : 'expired'
+      pending.push(this.signalInvitation(session.peer, action, session.sid, { reason: condition }))
     }
     this.publish(session, { reason, error })
     return Promise.all(pending)
@@ -273,7 +281,7 @@ export class JingleCall {
       this.onChange(null)
       return
     }
-    const declined = session.remoteOffer || (session.invitation && !session.proceeded)
+    const declined = session.remoteOffer || (session.invitation && !session.proposedTo && !session.proceeded)
     const reason = session.accepted ? 'success' : declined ? 'decline' : 'cancel'
     await this.finish(session, reason)
   }
@@ -423,12 +431,30 @@ export class JingleCall {
   }
 
   async start (address, video = false) {
-    const peer = fullJid(address)
+    const peer = callJid(address)
     if (!this.ownJid || !peer || peer.bare().toString() === this.ownJid.bare().toString()) {
       throw new Error('Choose a contact with an available calling device.')
     }
     if (this.session) throw new Error('There is already a call in progress.')
-    const session = this.createSession(nanoid(), peer.toString(), Boolean(video), 'outgoing')
+    if (peer.getResource()) {
+      return this.offer(this.createSession(nanoid(), peer.toString(), Boolean(video), 'outgoing'))
+    }
+    if (!this.sendInvitation) throw new Error('Choose a contact with an available calling device.')
+
+    const proposedTo = peer.toString()
+    const session = this.createSession(crypto.randomUUID(), proposedTo, Boolean(video), 'outgoing', {
+      invitation: true,
+      proposedTo,
+    })
+    if (this.session !== session) return
+    try {
+      await this.sendInvitation(proposedTo, 'propose', session.sid, { media: video ? ['audio', 'video'] : ['audio'] })
+    } catch {
+      if (!session.proceeded) this.finish(session, 'failed-application', 'Could not send the call invitation.', false)
+    }
+  }
+
+  async offer (session) {
     try {
       const pc = await this.openPeer(session)
       if (!pc) return
@@ -439,7 +465,10 @@ export class JingleCall {
       this.schedulePhaseTimeout(session)
       await this.sendDescription(session, 'session-initiate', children)
     } catch (error) {
-      if (session.phase === 'outgoing') this.finish(session, 'failed-application', localError(error, session.video), !error?.condition)
+      if (session.phase === 'outgoing') {
+        if (error?.condition) session.signalled = false
+        this.finish(session, 'failed-application', localError(error, session.video))
+      }
     }
   }
 
@@ -484,7 +513,8 @@ export class JingleCall {
     const current = this.session
     const ownBare = this.ownJid.bare().toString()
     const peer = from.toString()
-    if (from.bare().toString() === ownBare) {
+    const bare = from.bare().toString()
+    if (bare === ownBare) {
       if (peer === this.ownJid.toString() || !current?.invitation || current.sid !== sid || current.phase !== 'incoming') return
       const legacyCopy = target === ownBare && (action === 'accept' || action === 'reject')
       if (!legacyCopy && fullJid(target)?.toString() !== current.peer) return
@@ -497,17 +527,47 @@ export class JingleCall {
     }
 
     if (action === 'propose') {
-      if (!supportedMedia(mediaOrReason) || this.recentInvitations.has(sid) || (current?.invitation && current.sid === sid)) return
+      if (!supportedMedia(mediaOrReason) || this.recentInvitations.has(sid) ||
+          (current?.invitation && !current.proposedTo && current.sid === sid)) return
       this.rememberInvitation(sid)
-      if (current) return this.signalInvitation(peer, 'reject', sid, 'busy')
+      if (current?.proposedTo === bare && !current.proceeded) {
+        const details = { reason: 'expired', tieBreak: true }
+        if (current.sid < sid || (current.sid === sid && this.ownJid.toString() < peer)) {
+          return this.signalInvitation(peer, 'reject', sid, details)
+        }
+        this.cleanup(current)
+        this.signalInvitation(bare, 'retract', current.sid, details)
+      } else if (current) {
+        return this.signalInvitation(peer, 'reject', sid, { reason: 'busy' })
+      }
       const session = this.createSession(sid, peer, mediaOrReason.includes('video'), 'incoming', { invitation: true })
       if (this.session === session && session.phase === 'incoming') return this.signalInvitation(peer, 'ringing', sid)
+    } else if (current?.proposedTo === bare && current.sid === sid && !current.proceeded) {
+      return this.receiveProposalResponse(current, peer, action, mediaOrReason)
     } else if (current?.invitation && current.peer === peer && current.sid === sid) {
       if (action === 'finish' || (action === 'retract' && current.phase !== 'active')) {
         const reason = typeof mediaOrReason === 'string' && Object.hasOwn(REMOTE_END_MESSAGES, mediaOrReason) ? mediaOrReason :
           action === 'retract' ? 'cancel' : 'success'
         this.finish(current, reason, REMOTE_END_MESSAGES[reason], false)
       }
+    }
+  }
+
+  receiveProposalResponse (session, peer, action, reason) {
+    if (action === 'ringing' && !session.ringing) {
+      session.ringing = true
+      this.publish(session)
+    } else if (action === 'reject') {
+      const condition = Object.hasOwn(REMOTE_END_MESSAGES, reason) && reason !== 'success' ? reason : 'decline'
+      return this.finish(session, condition, REMOTE_END_MESSAGES[condition], false)
+    } else if (action === 'proceed') {
+      // Lock the resource before any asynchronous work. Another device may also answer.
+      session.peer = peer
+      session.proceeded = true
+      session.ringing = false
+      this.schedulePhaseTimeout(session)
+      this.publish(session)
+      return this.offer(session)
     }
   }
 
@@ -520,7 +580,7 @@ export class JingleCall {
     const current = this.session
     if (current?.invitation && current.sid === sid) {
       if (current.peer !== peer) throw stanzaError('item-not-found', 'unknown-session')
-      if (!current.proceeded || current.signalled) throw stanzaError('unexpected-request', 'out-of-order')
+      if (current.proposedTo || !current.proceeded || current.signalled) throw stanzaError('unexpected-request', 'out-of-order')
       if (!supportedMedia(media) || current.video !== video) throw stanzaError('bad-request')
       current.remoteOffer = this.offerDescription(jingle)
       current.mids = contents.map(content => content.attrs.name)
