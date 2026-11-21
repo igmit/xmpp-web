@@ -108,8 +108,8 @@ class XmppClient {
     })
   }
 
-  sendJingle (to, element) {
-    return this.xmpp.iqCaller.set(element, to)
+  sendJingle (to, element, timeout) {
+    return this.xmpp.iqCaller.set(element, to, timeout)
   }
 
   async getIceServers () {

@@ -164,7 +164,8 @@ async function startActiveCall (controller, sent) {
 function registerTestClient (t) {
   const client = new EventEmitter()
   const sent = []
-  client.xmpp = { jid: ALICE }
+  const messages = []
+  client.xmpp = { jid: ALICE, send: async stanza => messages.push(stanza) }
   client.parseJid = full => ({ full })
   client.getIceServers = async () => []
   client.sendJingle = async (peer, stanza) => sent.push({ peer, stanza })
@@ -174,7 +175,7 @@ function registerTestClient (t) {
   registerJingleCalls(socket, client)
   client.emit('online', ALICE)
   t.after(() => socket.calls.reset())
-  return { client, sent, socket, store }
+  return { client, messages, sent, socket, store }
 }
 
 test('keeps active media on XMPP resume or a fresh bind with the same full JID', async t => {
@@ -218,6 +219,131 @@ test('ends active media when loss of XMPP signaling exceeds the grace period', a
   assert.match(store.call.error, /XMPP connection was lost/)
   client.emit('resumed')
   assert.equal(store.call.phase, 'ended')
+})
+
+test('continues an outgoing invitation when proceed arrives during stream resumption', async t => {
+  const { client, messages, sent, socket, store } = registerTestClient(t)
+  const controller = socket.calls
+  await controller.start('bob@example.org')
+  const { id: sid } = messages[0].getChild('propose').attrs
+  client.emit('status', 'close')
+  client.emit('status', 'disconnect')
+  assert.equal(store.call.phase, 'outgoing')
+
+  const proceeding = controller.receiveInvitation(BOB, 'proceed', sid)
+  await setImmediate()
+  assert.equal(sent.length, 0)
+  client.emit('resumed')
+  await proceeding
+  assert.deepEqual(sent.map(({ peer, stanza }) => [peer, stanza.attrs.action, stanza.attrs.sid]), [
+    [BOB, 'session-initiate', sid],
+  ])
+  assert.equal(messages.length, 1)
+})
+
+test('keeps an incoming call ringing and sends proceed after reconnect', async t => {
+  const { controller, invitations, states } = setup(BOB)
+  t.after(() => controller.reset())
+  await controller.receiveInvitation(ALICE, 'propose', 'incoming', ['audio'])
+  controller.signalingLost()
+  assert.equal(states.at(-1).phase, 'incoming')
+
+  const accepting = controller.accept()
+  assert.equal(states.at(-1).phase, 'connecting')
+  assert.deepEqual(invitations.map(({ action }) => action), ['ringing'])
+  controller.signalingRestored()
+  await accepting
+  assert.deepEqual(invitations.map(({ action }) => action), ['ringing', 'proceed'])
+})
+
+test('retries a setup write that fails as signaling goes offline', async t => {
+  let attempts = 0
+  const { controller, states } = setup(BOB, {
+    async sendInvitation (peer, action) {
+      if (action === 'proceed' && ++attempts === 1) {
+        controller.signalingLost()
+        throw new Error('Socket closed during write')
+      }
+    },
+  })
+  t.after(() => controller.reset())
+  await controller.receiveInvitation(ALICE, 'propose', 'incoming', ['audio'])
+  const accepting = controller.accept()
+  await setImmediate()
+  assert.equal(states.at(-1).phase, 'connecting')
+  assert.equal(attempts, 1)
+  controller.signalingRestored()
+  await accepting
+  assert.equal(attempts, 2)
+})
+
+test('defers a prepared Jingle answer until signaling returns', async t => {
+  const { controller, sent, states } = setup(BOB)
+  t.after(() => controller.reset())
+  await controller.receive(ALICE, invitationOffer('direct'))
+  controller.signalingLost()
+  const accepting = controller.accept()
+  await setImmediate()
+  assert.equal(states.at(-1).phase, 'connecting')
+  assert.equal(sent.length, 0)
+  controller.signalingRestored()
+  await accepting
+  assert.deepEqual(sent.map(({ stanza }) => stanza.attrs.action), ['session-accept'])
+  FakePeer.instances[0].connect()
+  assert.equal(states.at(-1).phase, 'active')
+})
+
+test('retracts an invitation on reconnect after the caller hangs up offline', async t => {
+  const alice = setup(ALICE)
+  const bob = setup(BOB)
+  t.after(() => alice.controller.reset())
+  t.after(() => bob.controller.reset())
+  const bare = 'bob@example.org'
+  await alice.controller.start(bare)
+  const { sid } = alice.invitations[0]
+  await bob.controller.receiveInvitation(ALICE, 'propose', sid, ['audio'])
+  assert.equal(bob.states.at(-1).phase, 'incoming')
+
+  alice.controller.signalingLost()
+  await alice.controller.end()
+  assert.equal(alice.states.at(-1).phase, 'ended')
+  assert.equal(alice.invitations.length, 1)
+  await alice.controller.receiveInvitation(BOB, 'proceed', sid)
+  alice.controller.signalingRestored()
+  alice.controller.signalingRestored()
+  assert.deepEqual(alice.invitations.slice(1), [{ peer: bare, action: 'retract', sid, reason: 'cancel' }])
+  await bob.controller.receiveInvitation(ALICE, 'retract', sid, 'cancel')
+  assert.equal(bob.states.at(-1).phase, 'ended')
+  assert.equal(bob.states.at(-1).reason, 'cancel')
+  assert.equal(alice.sent.length, 0)
+})
+
+test('keeps the setup deadline and sends Jingle termination when signaling returns', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] })
+  const { client, sent, socket, store } = registerTestClient(t)
+  await socket.calls.start(BOB)
+  const { sid } = sent[0].stanza.attrs
+  const answer = offerSdp(false).replaceAll('a=setup:actpass', 'a=setup:active')
+  await socket.calls.receive(BOB, request('session-accept', sid, ...descriptionToJingle(answer, 'responder')))
+  t.mock.timers.tick(34000)
+  client.emit('status', 'disconnect')
+  assert.equal(store.call.phase, 'connecting')
+  t.mock.timers.tick(1000)
+  assert.equal(store.call.phase, 'ended')
+  assert.equal(sent.length, 1)
+  client.emit('resumed')
+  const { stanza } = sent[1]
+  assert.equal(stanza.attrs.action, 'session-terminate')
+  assert.equal(stanza.attrs.sid, sid)
+})
+
+test('drops deferred teardown when the client reconnects with a different full JID', async t => {
+  const { client, messages, socket } = registerTestClient(t)
+  await socket.calls.start('bob@example.org')
+  client.emit('status', 'disconnect')
+  await socket.calls.end()
+  client.emit('online', 'alice@example.org/New')
+  assert.equal(messages.length, 1)
 })
 
 test('gives the call peer time to return on the same resource', async t => {
@@ -330,6 +456,30 @@ test('buffers valid trickle ICE and rejects actions from another resource or ses
   const [pc] = FakePeer.instances
   assert.deepEqual(pc.candidates.map(value => value.sdpMid), ['0'])
   assert.match(pc.candidates[0].candidate, /192\.0\.2\.2/)
+})
+
+test('acknowledges a valid live ICE batch even when the browser rejects one candidate', async t => {
+  const { controller, sent } = setup(ALICE)
+  t.after(() => controller.reset())
+  const pc = await startActiveCall(controller, sent)
+  const { sid } = sent[0].stanza.attrs
+  const acceptedIp = '192.0.2.3'
+  const rejectedIp = '192.0.2.2'
+  const attempted = []
+  pc.addIceCandidate = async value => {
+    attempted.push(value.candidate)
+    if (value.candidate.includes(rejectedIp)) throw new Error('Browser rejected candidate')
+    pc.candidates.push(value)
+  }
+  const transport = xml('transport', { xmlns: ICE, ufrag: 'test' }, ...[rejectedIp, acceptedIp].map((ip, index) =>
+    xml('candidate', { foundation: String(index + 1), component: '1', protocol: 'udp', priority: '2122260223', ip, port: '50901', type: 'host' })))
+  const content = name => xml('content', { creator: 'initiator', name }, transport)
+
+  await controller.receive(BOB, request('transport-info', sid, content('0')))
+  assert.equal(attempted.length, 2)
+  assert.equal(pc.candidates.length, 1)
+  assert.ok(pc.candidates[0].candidate.includes(acceptedIp))
+  await assert.rejects(controller.receive(BOB, request('transport-info', sid, content('unknown'))), { condition: 'bad-request' })
 })
 
 test('uses the Jingle termination condition when explanatory text comes first', async t => {

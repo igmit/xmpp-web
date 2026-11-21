@@ -432,7 +432,7 @@ export default {
   },
 
   dismissCall () {
-    if (this.context.$store.call?.phase === 'ended') this.calls?.reset()
+    if (this.context.$store.call?.phase === 'ended') this.context.$store.call = null
   },
 
   async disconnect () {

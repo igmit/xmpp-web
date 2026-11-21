@@ -109,6 +109,8 @@ export class JingleCall {
     this.preferredMicrophone = null
     this.generation = 0
     this.recentInvitations = new Set()
+    this.signalingOffline = false
+    this.pendingTeardowns = []
   }
 
   createSession (sid, peer, video, phase, details) {
@@ -162,19 +164,52 @@ export class JingleCall {
     this.onChange({ phase, peer, video, localStream, remoteStream, microphoneStatus, microphoneError, ringing, ...ended })
   }
 
-  async sendAction (session, action, children) {
+  async sendAction (session, action, children, timeout) {
     const attrs = { xmlns: JINGLE, action, sid: session.sid }
     if (action === 'session-initiate') attrs.initiator = this.ownJid.toString()
     if (action === 'session-accept') attrs.responder = this.ownJid.toString()
-    await this.send(session.peer, xml('jingle', attrs, ...children))
+    await this.send(session.peer, xml('jingle', attrs, ...children), timeout)
   }
 
-  async signalTermination (session, reason) {
-    try {
-      await this.sendAction(session, 'session-terminate', [xml('reason', {}, xml(reason))])
-    } catch {
-      // Local media is already closed, including when the peer has gone offline.
+  async sendSetup (session, send) {
+    while (this.session === session) {
+      if (this.signalingOffline) {
+        if (!session.signalingReady) {
+          session.signalingReady = new Promise(resolve => { session.resumeSignaling = resolve })
+        }
+        await session.signalingReady
+        continue
+      }
+      try {
+        await send()
+        return this.session === session
+      } catch (error) {
+        // Stream management handles replay after a successful write. An IQ timeout
+        // or stanza error can follow delivery, so don't send that request again.
+        if (!this.signalingOffline || error?.condition || error?.name === 'TimeoutError') throw error
+      }
     }
+    return false
+  }
+
+  async sendTeardown (send, expiresAt = Date.now() + RING_TIMEOUT) {
+    if (expiresAt <= Date.now()) return
+    if (this.signalingOffline) {
+      this.pendingTeardowns.push({ send, expiresAt })
+      return
+    }
+    const generation = this.generation
+    try {
+      await send()
+    } catch (error) {
+      if (this.signalingOffline && generation === this.generation && !error?.condition && error?.name !== 'TimeoutError' && expiresAt > Date.now()) {
+        this.pendingTeardowns.push({ send, expiresAt })
+      }
+    }
+  }
+
+  signalTermination ({ peer, sid }, reason) {
+    return this.sendTeardown(() => this.sendAction({ peer, sid }, 'session-terminate', [xml('reason', {}, xml(reason))]))
   }
 
   async signalInvitation (peer, action, sid, details) {
@@ -208,6 +243,7 @@ export class JingleCall {
     clearTimeout(session.recoveryTimer)
     clearTimeout(session.signalingTimer)
     clearTimeout(session.peerPresenceTimer)
+    session.resumeSignaling?.()
     session.unwatchMicrophone?.()
     session.abort.abort()
     if (session.pc) {
@@ -229,11 +265,13 @@ export class JingleCall {
     const pending = []
     if (notifyPeer && session.signalled) pending.push(this.signalTermination(session, reason))
     if (notifyPeer && session.invitation) {
+      const { peer, sid } = session
       const action = session.proceeded ? 'finish' : session.proposedTo ? 'retract' : 'reject'
+      // JMI uses its default busy reason for a reject, including a user decline.
       const condition = reason === 'success' || reason === 'connectivity-error' ? reason :
         reason === 'decline' && action === 'reject' ? 'busy' :
           reason === 'cancel' && action === 'retract' ? 'cancel' : 'expired'
-      pending.push(this.signalInvitation(session.peer, action, session.sid, { reason: condition }))
+      pending.push(this.sendTeardown(() => this.sendInvitation(peer, action, sid, { reason: condition })))
     }
     this.publish(session, { reason, error })
     return Promise.all(pending)
@@ -241,27 +279,32 @@ export class JingleCall {
 
   reset () {
     this.generation += 1
+    this.pendingTeardowns = []
     if (this.session) this.cleanup(this.session)
     this.onChange(null)
   }
 
   signalingLost () {
+    this.signalingOffline = true
     const session = this.session
-    if (!session) return
-    if (session.phase !== 'active') {
-      this.finish(session, 'connectivity-error', SIGNALING_ERROR, false)
-    } else if (!session.signalingTimer) {
+    if (session && !session.signalingTimer) {
       session.signalingTimer = setTimeout(() => {
-        this.finish(session, 'connectivity-error', SIGNALING_ERROR, false)
+        this.finish(session, 'connectivity-error', SIGNALING_ERROR)
       }, SIGNALING_TIMEOUT)
     }
   }
 
   signalingRestored () {
-    if (!this.session) return
-    clearTimeout(this.session.signalingTimer)
-    this.session.signalingTimer = null
-    this.sendLocalCandidates(this.session)
+    this.signalingOffline = false
+    for (const { send, expiresAt } of this.pendingTeardowns.splice(0)) this.sendTeardown(send, expiresAt)
+    const session = this.session
+    if (!session) return
+    clearTimeout(session.signalingTimer)
+    session.signalingTimer = null
+    session.resumeSignaling?.()
+    session.resumeSignaling = null
+    session.signalingReady = null
+    this.sendLocalCandidates(session)
   }
 
   peerAvailabilityChanged (peer, available) {
@@ -413,13 +456,20 @@ export class JingleCall {
   }
 
   async sendDescription (session, action, children) {
-    await this.sendAction(session, action, children)
+    const sent = await this.sendSetup(session, () => {
+      if (action === 'session-initiate') session.signalled = true
+      if (action === 'session-accept') session.accepted = true
+      // The call's phase deadline governs setup, including time spent reconnecting.
+      return this.sendAction(session, action, children, RING_TIMEOUT)
+    })
+    if (!sent) return false
     session.localDescriptionSent = true
     this.sendLocalCandidates(session)
+    return true
   }
 
   sendLocalCandidates (session) {
-    if (this.session !== session || !session.localDescriptionSent || session.signalingTimer) return
+    if (this.session !== session || !session.localDescriptionSent || this.signalingOffline) return
     // The browser adds gathered candidates to local SDP before dispatching icecandidate.
     const contents = trickleToJingle(session.pc.localDescription.sdp, session.sentCandidates)
     if (contents.length) this.sendAction(session, 'transport-info', contents).catch(() => {})
@@ -453,10 +503,10 @@ export class JingleCall {
     })
     if (this.session !== session) return
     try {
-      await this.sendInvitation(proposedTo, 'propose', session.sid, {
+      await this.sendSetup(session, () => this.sendInvitation(proposedTo, 'propose', session.sid, {
         messageId: session.proposalMessageId,
         media: video ? ['audio', 'video'] : ['audio'],
-      })
+      }))
     } catch {
       if (!session.proceeded) this.finish(session, 'failed-application', 'Could not send the call invitation.', false)
     }
@@ -469,7 +519,6 @@ export class JingleCall {
       const children = await this.localDescription(session, await pc.createOffer(), 'initiator')
       if (!children) return
       session.mids = children.filter(child => child.name === 'content').map(content => content.attrs.name)
-      session.signalled = true
       this.schedulePhaseTimeout(session)
       await this.sendDescription(session, 'session-initiate', children)
     } catch (error) {
@@ -486,9 +535,11 @@ export class JingleCall {
     this.phase(session, 'connecting')
     if (this.session !== session) return
     if (session.invitation) {
-      session.proceeded = true
       try {
-        await this.sendInvitation(session.peer, 'proceed', session.sid)
+        await this.sendSetup(session, () => {
+          session.proceeded = true
+          return this.sendInvitation(session.peer, 'proceed', session.sid)
+        })
       } catch {
         if (!session.signalled) this.finish(session, 'failed-application', 'Could not accept the call invitation.', false)
       }
@@ -505,8 +556,7 @@ export class JingleCall {
       if (this.session !== session) return
       const children = await this.localDescription(session, await pc.createAnswer(), 'responder')
       if (!children) return
-      session.accepted = true
-      await this.sendDescription(session, 'session-accept', children)
+      if (!await this.sendDescription(session, 'session-accept', children)) return
       session.negotiated = true
       this.connectionChanged(session)
     } catch (error) {
@@ -667,7 +717,7 @@ export class JingleCall {
         if (session.candidates.length + candidates.length > 256) throw new Error('Too many pending candidates')
         session.candidates.push(...candidates)
       } else {
-        await Promise.all(candidates.map(candidate => session.pc.addIceCandidate(candidate)))
+        await Promise.allSettled(candidates.map(candidate => session.pc.addIceCandidate(candidate)))
       }
     } catch {
       throw stanzaError('bad-request')

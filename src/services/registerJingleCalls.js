@@ -16,6 +16,8 @@ export function registerJingleCalls (socket, client) {
   let rosterPending = true
   let replayTimer
   let replayDeadline
+  // Delayed proposals wait here so later stanzas can suppress them before delivery.
+  // The controller remembers delivered IDs to handle duplicate proposals and late Jingle IQs.
   const pending = new Map()
   const suppressed = new Map()
 
@@ -40,7 +42,7 @@ export function registerJingleCalls (socket, client) {
       address = ownJid
       controller = new JingleCall({
         ownJid: address.full,
-        send: (peer, jingle) => client.sendJingle(peer, jingle),
+        send: (peer, jingle, timeout) => client.sendJingle(peer, jingle, timeout),
         sendInvitation: (peer, action, sid, details) => client.xmpp.send(invitationMessage(peer, action, sid, details)),
         onChange: call => { socket.context.$store.call = call },
         iceServers: () => client.getIceServers(),
