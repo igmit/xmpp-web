@@ -1,6 +1,6 @@
 <template>
   <section v-if="call" class="call-panel box has-background-shade-2 p-4" :class="{ 'call-panel-home': $route.name === 'home' }" aria-label="Call controls">
-    <incoming-ringtone v-if="call.phase === 'incoming' && callRingtoneEnabled" ref="ringtone" />
+    <incoming-ringtone v-if="call.phase === 'incoming' && callRingtoneEnabled && !soundMuted" ref="ringtone" />
     <p class="has-text-weight-semibold">{{ status }}</p>
     <p class="call-peer mb-3" :title="call.peer">{{ peer }}</p>
     <p v-if="call.error" class="has-text-danger-light mb-3" role="alert">{{ call.error }}</p>
@@ -15,16 +15,12 @@
     <microphone-recovery v-else-if="call.phase !== 'ended' && call.microphoneStatus" :call="call" />
     <div class="buttons mb-0">
       <button v-if="call.remoteStream && playbackBlocked" type="button" class="button" @click="playRemoteMedia">Play call media</button>
-      <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @keydown.stop @click="acceptCall">
-        <span class="icon call-icon accept-icon" aria-hidden="true" />
-        <span>Accept</span>
-      </button>
-      <template v-if="showMediaControls">
+      <div v-if="showMediaControls" class="buttons mb-0" :class="call.phase === 'incoming' ? 'incoming-media-controls' : 'mr-2'">
         <button
           type="button"
           class="button"
           :class="{ 'is-warning': call.microphoneMuted }"
-          :disabled="!call.localStream || call.microphoneStatus === 'unavailable' || call.microphoneStatus === 'reconnecting'"
+          :disabled="call.microphoneStatus === 'unavailable' || call.microphoneStatus === 'reconnecting'"
           aria-label="Mute mic"
           :aria-pressed="call.microphoneMuted"
           :title="call.microphoneMuted ? 'Unmute mic' : 'Mute mic'"
@@ -41,7 +37,7 @@
           :aria-pressed="soundMuted"
           :title="soundMuted ? 'Unmute sound' : 'Mute sound'"
           @keydown.stop
-          @click="soundMuted = !soundMuted"
+          @click.stop="soundMuted = !soundMuted"
         >
           <span class="icon call-icon sound-icon" aria-hidden="true" />
         </button>
@@ -50,7 +46,7 @@
           type="button"
           class="button"
           :class="{ 'is-warning': call.cameraOff }"
-          :disabled="!call.localStream?.getVideoTracks().some(track => track.readyState === 'live')"
+          :disabled="call.localStream && !call.localStream.getVideoTracks().some(track => track.readyState === 'live')"
           aria-label="Turn off camera"
           :aria-pressed="call.cameraOff"
           :title="call.cameraOff ? 'Turn on camera' : 'Turn off camera'"
@@ -59,13 +55,17 @@
         >
           <span class="icon call-icon camera-icon" aria-hidden="true" />
         </button>
-      </template>
+      </div>
+      <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @keydown.stop @click="acceptCall">
+        <span class="icon call-icon accept-icon" aria-hidden="true" />
+        <span>Accept</span>
+      </button>
       <template v-if="call.phase === 'ended'">
         <button type="button" class="button" @click="$xmpp.dismissCall()">Dismiss</button>
         <span class="is-size-7 has-text-grey-light mb-2">Closing in {{ dismissSeconds }}s</span>
       </template>
-      <button v-else type="button" class="button is-danger" :class="{ 'ml-auto': showMediaControls }" @keydown.stop @click="endCall">
-        <span class="icon call-icon" :class="showMediaControls ? 'hang-up-icon' : 'end-call-icon'" aria-hidden="true" />
+      <button v-else type="button" class="button is-danger" :class="{ 'ml-auto': showHangUp }" @keydown.stop @click="endCall">
+        <span class="icon call-icon" :class="showHangUp ? 'hang-up-icon' : 'end-call-icon'" aria-hidden="true" />
         <span>{{ endLabel }}</span>
       </button>
     </div>
@@ -123,6 +123,9 @@ export default {
       return this.call?.remoteStream
     },
     showMediaControls () {
+      return this.call?.phase === 'incoming' || this.showHangUp
+    },
+    showHangUp () {
       return this.call?.phase === 'connecting' || this.call?.phase === 'active'
     },
   },
@@ -145,8 +148,11 @@ export default {
     remoteStream () {
       this.playbackBlocked = false
     },
-    showMediaControls (visible) {
-      if (!visible) this.soundMuted = false
+    showMediaControls: {
+      flush: 'sync',
+      handler (visible) {
+        if (!visible) this.soundMuted = false
+      },
     },
   },
   beforeUnmount () {
@@ -194,6 +200,10 @@ export default {
 
 .call-peer {
   overflow-wrap: anywhere;
+}
+
+.incoming-media-controls {
+  flex-basis: 100%;
 }
 
 .button[aria-pressed="false"]:is(:focus, :active) {

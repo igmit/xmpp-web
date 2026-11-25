@@ -672,6 +672,28 @@ test('turns the camera off and on during a video call and resets it for the next
   assert.equal(states.at(-1).localStream.getVideoTracks()[0].enabled, true)
 })
 
+test('applies incoming call media choices before adding tracks to the connection', async t => {
+  const { controller, states } = setup(BOB)
+  t.after(() => controller.reset())
+  await controller.receive(ALICE, invitationOffer('muted-answer', true))
+
+  controller.setMicrophoneMuted(true)
+  controller.setCameraOff(true)
+  assert.equal(states.at(-1).phase, 'incoming')
+  assert.equal(states.at(-1).microphoneMuted, true)
+  assert.equal(states.at(-1).cameraOff, true)
+  assert.deepEqual(captureRequests, [])
+
+  const tracksAdded = []
+  const addTrack = FakePeer.prototype.addTrack
+  t.mock.method(FakePeer.prototype, 'addTrack', function (track, stream) {
+    tracksAdded.push([track.kind, track.enabled])
+    return addTrack.call(this, track, stream)
+  })
+  await controller.accept()
+  assert.deepEqual(tracksAdded, [['audio', false], ['video', false]])
+})
+
 test('cancels an async ICE lookup and closes captured media on disconnect', async t => {
   let resolveIceServers
   const alice = setup(ALICE, { iceServers: () => new Promise(resolve => { resolveIceServers = resolve }) })

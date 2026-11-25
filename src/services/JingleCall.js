@@ -370,6 +370,7 @@ export class JingleCall {
     pc.onconnectionstatechange = () => this.connectionChanged(session)
     pc.onicecandidate = () => this.sendLocalCandidates(session)
     for (const track of stream.getTracks()) {
+      track.enabled = !(track.kind === 'audio' ? session.microphoneMuted : session.cameraOff)
       const sender = pc.addTrack(track, stream)
       if (track.kind === 'audio') session.microphoneSender = sender
     }
@@ -402,18 +403,18 @@ export class JingleCall {
 
   setMicrophoneMuted (muted) {
     const session = this.session
-    const track = session?.microphoneSender?.track
-    if (track?.readyState !== 'live' || session.microphoneStatus === 'reconnecting') return
-    track.enabled = !muted
+    if (!session || session.microphoneStatus === 'reconnecting') return
+    const track = session.microphoneSender?.track
+    if (track?.readyState === 'live') track.enabled = !muted
     session.microphoneMuted = muted
     this.publish(session)
   }
 
   setCameraOff (off) {
     const session = this.session
-    const track = session?.localStream?.getVideoTracks().find(track => track.readyState === 'live')
-    if (!track) return
-    track.enabled = !off
+    if (!session?.video) return
+    const track = session.localStream?.getVideoTracks().find(track => track.readyState === 'live')
+    if (track) track.enabled = !off
     session.cameraOff = off
     this.publish(session)
   }
