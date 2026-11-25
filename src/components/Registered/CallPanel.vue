@@ -1,13 +1,13 @@
 <template>
-  <section v-if="call" class="call-panel box has-background-shade-2 p-4" aria-label="Call controls">
+  <section v-if="call" class="call-panel box has-background-shade-2 p-4" :class="{ 'call-panel-home': $route.name === 'home' }" aria-label="Call controls">
     <incoming-ringtone v-if="call.phase === 'incoming' && callRingtoneEnabled" ref="ringtone" />
     <p class="has-text-weight-semibold">{{ status }}</p>
     <p class="call-peer mb-3" :title="call.peer">{{ peer }}</p>
     <p v-if="call.error" class="has-text-danger-light mb-3" role="alert">{{ call.error }}</p>
 
     <div v-if="call.phase !== 'ended' && (call.localStream || call.remoteStream)" class="call-media">
-      <video v-if="call.video && call.remoteStream" ref="remoteMedia" class="remote-video" :srcObject.prop="call.remoteStream" autoplay playsinline aria-label="Remote video" @loadedmetadata="playRemoteMedia" @play="playbackBlocked = false" />
-      <audio v-else-if="call.remoteStream" ref="remoteMedia" :srcObject.prop="call.remoteStream" autoplay aria-label="Call audio" @loadedmetadata="playRemoteMedia" @play="playbackBlocked = false" />
+      <video v-if="call.video && call.remoteStream" ref="remoteMedia" class="remote-video" :srcObject.prop="call.remoteStream" :muted.prop="soundMuted" autoplay playsinline aria-label="Remote video" @loadedmetadata="playRemoteMedia" @play="playbackBlocked = false" />
+      <audio v-else-if="call.remoteStream" ref="remoteMedia" :srcObject.prop="call.remoteStream" :muted.prop="soundMuted" autoplay aria-label="Call audio" @loadedmetadata="playRemoteMedia" @play="playbackBlocked = false" />
       <video v-if="call.video && call.localStream" class="local-video" :srcObject.prop="call.localStream" autoplay playsinline :muted="true" aria-label="Your camera preview" />
     </div>
 
@@ -15,9 +15,45 @@
     <microphone-recovery v-else-if="call.phase !== 'ended' && call.microphoneStatus" :call="call" />
     <div class="buttons mb-0">
       <button v-if="call.remoteStream && playbackBlocked" type="button" class="button" @click="playRemoteMedia">Play call media</button>
-      <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @keydown.stop @click="acceptCall">Accept</button>
-      <button v-if="call.phase === 'ended'" type="button" class="button" @click="$xmpp.dismissCall()">Dismiss</button>
-      <button v-else type="button" class="button is-danger" @keydown.stop @click="endCall">{{ endLabel }}</button>
+      <button v-if="call.phase === 'incoming'" type="button" class="button is-primary" @keydown.stop @click="acceptCall">
+        <span class="icon call-icon accept-icon" aria-hidden="true" />
+        <span>Accept</span>
+      </button>
+      <template v-if="showMuteControls">
+        <button
+          type="button"
+          class="button"
+          :class="{ 'is-warning': call.microphoneMuted }"
+          :disabled="!call.localStream || call.microphoneStatus === 'unavailable' || call.microphoneStatus === 'reconnecting'"
+          aria-label="Mute mic"
+          :aria-pressed="call.microphoneMuted"
+          :title="call.microphoneMuted ? 'Unmute mic' : 'Mute mic'"
+          @keydown.stop
+          @click="$xmpp.setMicrophoneMuted(!call.microphoneMuted)"
+        >
+          <span class="icon call-icon mic-icon" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          class="button"
+          :class="{ 'is-warning': soundMuted }"
+          aria-label="Mute sound"
+          :aria-pressed="soundMuted"
+          :title="soundMuted ? 'Unmute sound' : 'Mute sound'"
+          @keydown.stop
+          @click="soundMuted = !soundMuted"
+        >
+          <span class="icon call-icon sound-icon" aria-hidden="true" />
+        </button>
+      </template>
+      <template v-if="call.phase === 'ended'">
+        <button type="button" class="button" @click="$xmpp.dismissCall()">Dismiss</button>
+        <span class="is-size-7 has-text-grey-light mb-2">Closing in {{ dismissSeconds }}s</span>
+      </template>
+      <button v-else type="button" class="button is-danger" @keydown.stop @click="endCall">
+        <span class="icon call-icon" :class="showMuteControls ? 'hang-up-icon' : 'end-call-icon'" aria-hidden="true" />
+        <span>{{ endLabel }}</span>
+      </button>
     </div>
   </section>
   <p class="is-sr-only" role="status">{{ call ? `${status}. ${peer}` : '' }}</p>
@@ -29,6 +65,8 @@ import { mapState } from 'pinia'
 import { useStore } from '@/store'
 import IncomingRingtone from './IncomingRingtone.vue'
 
+const DISMISS_SECONDS = 5
+
 export default {
   name: 'CallPanel',
   components: {
@@ -38,6 +76,9 @@ export default {
   data () {
     return {
       playbackBlocked: false,
+      soundMuted: false,
+      dismissSeconds: DISMISS_SECONDS,
+      dismissTimer: null,
     }
   },
   computed: {
@@ -67,11 +108,35 @@ export default {
     remoteStream () {
       return this.call?.remoteStream
     },
+    showMuteControls () {
+      return this.call?.phase === 'connecting' || this.call?.phase === 'active'
+    },
   },
   watch: {
+    call: {
+      immediate: true,
+      handler (call) {
+        clearInterval(this.dismissTimer)
+        if (call?.phase !== 'ended') return
+
+        const deadline = Date.now() + DISMISS_SECONDS * 1000
+        this.dismissSeconds = DISMISS_SECONDS
+        this.dismissTimer = setInterval(() => {
+          if (this.call !== call) return
+          this.dismissSeconds = Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+          if (!this.dismissSeconds) this.$xmpp.dismissCall()
+        }, 1000)
+      },
+    },
     remoteStream () {
       this.playbackBlocked = false
     },
+    showMuteControls (visible) {
+      if (!visible) this.soundMuted = false
+    },
+  },
+  beforeUnmount () {
+    clearInterval(this.dismissTimer)
   },
   methods: {
     acceptCall () {
@@ -99,17 +164,60 @@ export default {
 
 <style scoped>
 .call-panel {
+  --call-panel-top: 6.5rem;
   position: fixed;
-  top: 6.5rem;
+  top: var(--call-panel-top);
   right: 1rem;
   z-index: 10;
   width: min(23rem, calc(100% - 2rem));
-  max-height: calc(100% - 7.5rem);
+  max-height: calc(100% - var(--call-panel-top) - 1rem);
   overflow: auto;
+}
+
+.call-panel-home {
+  --call-panel-top: 4.25rem;
 }
 
 .call-peer {
   overflow-wrap: anywhere;
+}
+
+.button[aria-pressed="false"]:is(:focus, :active) {
+  color: inherit;
+}
+
+.call-icon {
+  background-color: currentColor;
+  mask: var(--call-icon) center / 1em 1em no-repeat;
+}
+
+.mic-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/microphone.svg');
+}
+
+[aria-pressed="true"] .mic-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/microphone-slash.svg');
+}
+
+.sound-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/volume-high.svg');
+}
+
+[aria-pressed="true"] .sound-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/volume-xmark.svg');
+}
+
+.accept-icon,
+.hang-up-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/phone.svg');
+}
+
+.hang-up-icon {
+  transform: rotate(135deg);
+}
+
+.end-call-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/phone-slash.svg');
 }
 
 .call-media {

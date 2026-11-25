@@ -57,6 +57,7 @@ class FakeTrack extends EventTarget {
     this.kind = kind
     this.stopped = false
     this.readyState = 'live'
+    this.enabled = true
     this.muted = false
   }
 
@@ -615,6 +616,36 @@ test('distinguishes microphone mute, unmute and loss and observes the replacemen
   const ended = states.at(-1)
   replacement.setMuted(true)
   assert.equal(states.at(-1), ended)
+})
+
+test('keeps an explicitly muted microphone silent through replacement and resets mute for a new call', async t => {
+  const { controller, sent, states } = setup(ALICE)
+  t.after(() => controller.reset())
+  const pc = await startActiveCall(controller, sent)
+  const [track] = pc.tracks
+  assert.equal(states.at(-1).microphoneMuted, false)
+
+  controller.setMicrophoneMuted(true)
+  assert.equal(track.enabled, false)
+  assert.equal(states.at(-1).microphoneMuted, true)
+  assert.equal(states.at(-1).microphoneStatus, null)
+
+  track.stop()
+  track.dispatchEvent(new Event('ended'))
+  await controller.reconnectMicrophone()
+  const [replacement] = states.at(-1).localStream.getAudioTracks()
+  assert.equal(replacement.enabled, false)
+  assert.equal(states.at(-1).microphoneMuted, true)
+
+  controller.setMicrophoneMuted(false)
+  assert.equal(replacement.enabled, true)
+  assert.equal(states.at(-1).microphoneMuted, false)
+
+  controller.setMicrophoneMuted(true)
+  await controller.end()
+  await controller.start(BOB)
+  assert.equal(states.at(-1).microphoneMuted, false)
+  assert.equal(states.at(-1).localStream.getAudioTracks()[0].enabled, true)
 })
 
 test('cancels an async ICE lookup and closes captured media on disconnect', async t => {

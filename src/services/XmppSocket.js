@@ -423,6 +423,10 @@ export default {
     return this.calls?.accept()
   },
 
+  setMicrophoneMuted (muted) {
+    this.calls?.setMicrophoneMuted(muted)
+  },
+
   reconnectMicrophone (deviceId) {
     return this.calls?.reconnectMicrophone(deviceId)
   },

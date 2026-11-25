@@ -218,7 +218,8 @@ describe('XMPP Web for registered users', () => {
       cy.get(videoCall).should('be.enabled')
     })
 
-    it('shows a media permission failure and lets the user dismiss it', () => {
+    it('shows a media permission failure and closes the ended call after counting down', () => {
+      cy.clock(Date.now(), ['Date', 'setInterval', 'clearInterval'])
       cy.window().then(win => {
         cy.stub(win.navigator.mediaDevices, 'getUserMedia')
           .rejects(new win.DOMException('Permission denied', 'NotAllowedError'))
@@ -228,7 +229,11 @@ describe('XMPP Web for registered users', () => {
       cy.get('@getUserMedia').should('have.been.calledOnce')
       cy.get(callPanel).should('contain', 'Call ended')
         .find('[role="alert"]').should('be.visible')
-      cy.contains(`${callPanel} button`, 'Dismiss').click()
+      cy.contains(`${callPanel} button`, 'Dismiss').should('be.visible')
+      cy.get(callPanel).should('contain', 'Closing in 5s')
+      cy.tick(4000)
+      cy.get(callPanel).should('contain', 'Closing in 1s')
+      cy.tick(1000)
       cy.get(callPanel).should('not.exist')
       cy.get(audioCall).should('be.enabled')
     })

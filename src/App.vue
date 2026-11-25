@@ -8,14 +8,14 @@
 
 <script>
 
+import { defineAsyncComponent } from 'vue'
 import { mapActions } from 'pinia'
 import { useStore } from '@/store'
-import CallPanel from '@/components/Registered/CallPanel.vue'
 
 export default {
   name: 'App',
   components: {
-    CallPanel,
+    CallPanel: defineAsyncComponent(() => import('@/components/Registered/CallPanel.vue')),
   },
   mounted () {
     if (typeof window.config.name === 'string' && window.config.name !== '') {

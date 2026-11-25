@@ -120,6 +120,7 @@ export class JingleCall {
       candidates: [],
       localStream: null,
       remoteStream: null,
+      microphoneMuted: false,
       ...details,
     }
     this.session = session
@@ -160,8 +161,8 @@ export class JingleCall {
 
   publish (session, ended) {
     const { phase, peer, video, localStream, remoteStream, ringing } = session
-    const { microphoneStatus, microphoneError } = session
-    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneStatus, microphoneError, ringing, ...ended })
+    const { microphoneMuted, microphoneStatus, microphoneError } = session
+    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneMuted, microphoneStatus, microphoneError, ringing, ...ended })
   }
 
   async sendAction (session, action, children, timeout) {
@@ -398,6 +399,15 @@ export class JingleCall {
     }
   }
 
+  setMicrophoneMuted (muted) {
+    const session = this.session
+    const track = session?.microphoneSender?.track
+    if (track?.readyState !== 'live' || session.microphoneStatus === 'reconnecting') return
+    track.enabled = !muted
+    session.microphoneMuted = muted
+    this.publish(session)
+  }
+
   async reconnectMicrophone (deviceId) {
     const session = this.session
     if (session?.microphoneStatus !== 'unavailable') return
@@ -412,6 +422,7 @@ export class JingleCall {
       if (this.session !== session) return
       const [track] = replacement.getAudioTracks()
       if (track?.readyState !== 'live') throw setupError('The microphone stopped during capture.')
+      track.enabled = !session.microphoneMuted
       await session.microphoneSender.replaceTrack(track)
       if (this.session !== session) return
       session.unwatchMicrophone()
