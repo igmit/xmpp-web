@@ -8,7 +8,7 @@
     <div v-if="call.phase !== 'ended' && (call.localStream || call.remoteStream)" class="call-media">
       <video v-if="call.video && call.remoteStream" ref="remoteMedia" class="remote-video" :srcObject.prop="call.remoteStream" :muted.prop="soundMuted" autoplay playsinline aria-label="Remote video" @loadedmetadata="playRemoteMedia" @play="playbackBlocked = false" />
       <audio v-else-if="call.remoteStream" ref="remoteMedia" :srcObject.prop="call.remoteStream" :muted.prop="soundMuted" autoplay aria-label="Call audio" @loadedmetadata="playRemoteMedia" @play="playbackBlocked = false" />
-      <video v-if="call.video && call.localStream" class="local-video" :srcObject.prop="call.localStream" autoplay playsinline :muted="true" aria-label="Your camera preview" />
+      <video v-if="call.video && call.localStream && !call.cameraOff" class="local-video" :srcObject.prop="call.localStream" autoplay playsinline :muted="true" aria-label="Your camera preview" />
     </div>
 
     <p v-if="call.phase !== 'ended' && call.microphoneStatus === 'muted'" class="mb-3" role="status">Your microphone is temporarily interrupted. The other person cannot hear you.</p>
@@ -19,7 +19,7 @@
         <span class="icon call-icon accept-icon" aria-hidden="true" />
         <span>Accept</span>
       </button>
-      <template v-if="showMuteControls">
+      <template v-if="showMediaControls">
         <button
           type="button"
           class="button"
@@ -45,13 +45,27 @@
         >
           <span class="icon call-icon sound-icon" aria-hidden="true" />
         </button>
+        <button
+          v-if="call.video"
+          type="button"
+          class="button"
+          :class="{ 'is-warning': call.cameraOff }"
+          :disabled="!call.localStream?.getVideoTracks().some(track => track.readyState === 'live')"
+          aria-label="Turn off camera"
+          :aria-pressed="call.cameraOff"
+          :title="call.cameraOff ? 'Turn on camera' : 'Turn off camera'"
+          @keydown.stop
+          @click="$xmpp.setCameraOff(!call.cameraOff)"
+        >
+          <span class="icon call-icon camera-icon" aria-hidden="true" />
+        </button>
       </template>
       <template v-if="call.phase === 'ended'">
         <button type="button" class="button" @click="$xmpp.dismissCall()">Dismiss</button>
         <span class="is-size-7 has-text-grey-light mb-2">Closing in {{ dismissSeconds }}s</span>
       </template>
-      <button v-else type="button" class="button is-danger" @keydown.stop @click="endCall">
-        <span class="icon call-icon" :class="showMuteControls ? 'hang-up-icon' : 'end-call-icon'" aria-hidden="true" />
+      <button v-else type="button" class="button is-danger" :class="{ 'ml-auto': showMediaControls }" @keydown.stop @click="endCall">
+        <span class="icon call-icon" :class="showMediaControls ? 'hang-up-icon' : 'end-call-icon'" aria-hidden="true" />
         <span>{{ endLabel }}</span>
       </button>
     </div>
@@ -108,7 +122,7 @@ export default {
     remoteStream () {
       return this.call?.remoteStream
     },
-    showMuteControls () {
+    showMediaControls () {
       return this.call?.phase === 'connecting' || this.call?.phase === 'active'
     },
   },
@@ -131,7 +145,7 @@ export default {
     remoteStream () {
       this.playbackBlocked = false
     },
-    showMuteControls (visible) {
+    showMediaControls (visible) {
       if (!visible) this.soundMuted = false
     },
   },
@@ -205,6 +219,14 @@ export default {
 
 [aria-pressed="true"] .sound-icon {
   --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/volume-xmark.svg');
+}
+
+.camera-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/video.svg');
+}
+
+[aria-pressed="true"] .camera-icon {
+  --call-icon: url('@fortawesome/fontawesome-free/svgs/solid/video-slash.svg');
 }
 
 .accept-icon,

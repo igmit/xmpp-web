@@ -121,6 +121,7 @@ export class JingleCall {
       localStream: null,
       remoteStream: null,
       microphoneMuted: false,
+      cameraOff: false,
       ...details,
     }
     this.session = session
@@ -160,9 +161,9 @@ export class JingleCall {
   }
 
   publish (session, ended) {
-    const { phase, peer, video, localStream, remoteStream, ringing } = session
+    const { phase, peer, video, localStream, remoteStream, ringing, cameraOff } = session
     const { microphoneMuted, microphoneStatus, microphoneError } = session
-    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneMuted, microphoneStatus, microphoneError, ringing, ...ended })
+    this.onChange({ phase, peer, video, localStream, remoteStream, microphoneMuted, microphoneStatus, microphoneError, ringing, cameraOff, ...ended })
   }
 
   async sendAction (session, action, children, timeout) {
@@ -405,6 +406,15 @@ export class JingleCall {
     if (track?.readyState !== 'live' || session.microphoneStatus === 'reconnecting') return
     track.enabled = !muted
     session.microphoneMuted = muted
+    this.publish(session)
+  }
+
+  setCameraOff (off) {
+    const session = this.session
+    const track = session?.localStream?.getVideoTracks().find(track => track.readyState === 'live')
+    if (!track) return
+    track.enabled = !off
+    session.cameraOff = off
     this.publish(session)
   }
 

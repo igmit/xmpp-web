@@ -76,6 +76,7 @@ class FakeStream {
   constructor (tracks = []) { this.tracks = tracks }
   getTracks () { return this.tracks }
   getAudioTracks () { return this.tracks.filter(track => track.kind === 'audio') }
+  getVideoTracks () { return this.tracks.filter(track => track.kind === 'video') }
   removeTrack (track) { this.tracks = this.tracks.filter(item => item !== track) }
   addTrack (track) { this.tracks.push(track) }
 }
@@ -152,11 +153,11 @@ afterEach(() => {
   })
 })
 
-async function startActiveCall (controller, sent) {
-  await controller.start(BOB)
+async function startActiveCall (controller, sent, video = false) {
+  await controller.start(BOB, video)
   const pc = FakePeer.instances.at(-1)
   const [{ stanza: offer }] = sent
-  const answer = offerSdp(false).replaceAll('a=setup:actpass', 'a=setup:active')
+  const answer = offerSdp(video).replaceAll('a=setup:actpass', 'a=setup:active')
   await controller.receive(BOB, request('session-accept', offer.attrs.sid, ...descriptionToJingle(answer, 'responder')))
   pc.connect()
   return pc
@@ -646,6 +647,29 @@ test('keeps an explicitly muted microphone silent through replacement and resets
   await controller.start(BOB)
   assert.equal(states.at(-1).microphoneMuted, false)
   assert.equal(states.at(-1).localStream.getAudioTracks()[0].enabled, true)
+})
+
+test('turns the camera off and on during a video call and resets it for the next call', async t => {
+  const { controller, sent, states } = setup(ALICE)
+  t.after(() => controller.reset())
+  const pc = await startActiveCall(controller, sent, true)
+  const [microphone, camera] = pc.tracks
+
+  controller.setCameraOff(true)
+  assert.equal(camera.enabled, false)
+  assert.equal(microphone.enabled, true)
+  assert.equal(states.at(-1).cameraOff, true)
+  assert.equal(states.at(-1).phase, 'active')
+
+  controller.setCameraOff(false)
+  assert.equal(camera.enabled, true)
+  assert.equal(states.at(-1).cameraOff, false)
+
+  controller.setCameraOff(true)
+  await controller.end()
+  await controller.start(BOB, true)
+  assert.equal(states.at(-1).cameraOff, false)
+  assert.equal(states.at(-1).localStream.getVideoTracks()[0].enabled, true)
 })
 
 test('cancels an async ICE lookup and closes captured media on disconnect', async t => {

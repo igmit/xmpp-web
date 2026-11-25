@@ -427,6 +427,10 @@ export default {
     this.calls?.setMicrophoneMuted(muted)
   },
 
+  setCameraOff (off) {
+    this.calls?.setCameraOff(off)
+  },
+
   reconnectMicrophone (deviceId) {
     return this.calls?.reconnectMicrophone(deviceId)
   },
